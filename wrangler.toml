@@ -1,0 +1,24 @@
+name = "caremanage"  # Cloudflare 上の Worker 名と同じにする
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# 個人情報を扱うため、ログ出力は最小限にしています
+[observability]
+enabled = true
+
+[vars]
+# フロントエンド（GitHub Pages）の URL をカンマ区切りで指定
+# 添付ファイルの保存先: "d1"（既定）または "r2"。R2 に切り替えるときは下の r2_buckets も有効にする
+FILE_STORAGE = "d1"
+ALLOWED_ORIGINS = "https://YOUR-GITHUB-ID.github.io"  # ← GitHub Pages の URL（最後の / なし）に書き換え
+
+[[d1_databases]]
+binding = "DB"
+database_name = "caremane-share"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"  # ← D1 の画面に出ている「データベース ID」に書き換え
+# 機密値（DATA_KEY, SETUP_TOKEN）は wrangler secret put で登録します（このファイルには書かない）
+
+# 利用者が増えたら R2 に切り替え（npx wrangler r2 bucket create caremane-files のあと、下の3行を有効にし FILE_STORAGE = "r2"）
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "caremane-files"
