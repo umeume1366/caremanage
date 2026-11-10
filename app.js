@@ -190,6 +190,9 @@
     mount(h('div', { class: 'login-top' }, sizeButton(true)), h('main', { class: 'login' },
       h('div', { class: 'logo' }, 'ケアつなぎ'),
       h('p', { class: 'tagline' }, 'ケアマネジャーと事業所をつなぐ連絡帳'),
+      API === 'demo' ? h('div', { class: 'demo-note' }, h('b', null, 'デモモードで動いています'), h('br'),
+        'ケアマネ：cm-demo　事業所：office-demo / nurse-demo / day-demo', h('br'), 'パスワード（共通）：Demo-pass-123', h('br'),
+        h('span', { class: 'hint' }, '見本データです。再読み込みすると元に戻ります。')) : null,
       form,
       h('div', { class: 'secure-note' }, '🔒 安心してお使いいただくために',
         h('ul', null,
@@ -199,7 +202,39 @@
           h('li', null, 'だれがいつ見たかを記録しています'),
         )),
     ));
+    if (API !== 'demo') app.querySelector('main.login').append(h('p', { class: 'setup-link' }, h('button', { type: 'button', class: 'linkbtn', onclick: renderSetup }, 'はじめての設定（最初のケアマネジャー登録）')));
     idIn.focus();
+  }
+
+  // 最初のケアマネ登録（Cloudflare に登録した SETUP_TOKEN が必要）
+  function renderSetup() {
+    const err = h('p', { class: 'error', role: 'alert' });
+    const tok = h('input', { type: 'password', id: 'setup-token', autocomplete: 'off' });
+    const name = h('input', { type: 'text', id: 'setup-name', maxlength: '50' });
+    const lid = h('input', { type: 'text', id: 'setup-id', autocapitalize: 'off', spellcheck: 'false', maxlength: '64' });
+    const pw = h('input', { type: 'password', id: 'setup-pw', autocomplete: 'new-password' });
+    const pw2 = h('input', { type: 'password', id: 'setup-pw2', autocomplete: 'new-password' });
+    const btn = h('button', { class: 'btn block', type: 'submit' }, '登録する');
+    mount(h('div', { class: 'login-top' }, sizeButton(true)), h('main', { class: 'login' },
+      h('h2', null, 'ケアマネジャーの登録'),
+      h('p', { class: 'hint' }, 'Cloudflare に登録した「セットアップキー（SETUP_TOKEN）」を持っている人だけが登録できます。'),
+      h('form', { onsubmit: async (e) => {
+        e.preventDefault(); err.textContent = '';
+        if (pw.value !== pw2.value) { err.textContent = 'パスワードが一致しません'; return; }
+        btn.disabled = true;
+        try {
+          await api('POST', '/api/setup', { setup_token: tok.value, name: name.value, login_id: lid.value.trim(), password: pw.value });
+          renderLogin('登録しました。いま決めたログインIDとパスワードでログインしてください');
+        } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+      } },
+        h('label', { class: 'field' }, 'セットアップキー', tok),
+        h('label', { class: 'field' }, '氏名', name),
+        h('label', { class: 'field' }, 'ログインID', h('span', { class: 'hint' }, '（半角英数字4文字以上）'), lid),
+        h('label', { class: 'field' }, 'パスワード', h('span', { class: 'hint' }, '（10文字以上・英字と数字など2種類以上）'), pw),
+        h('label', { class: 'field' }, 'パスワード（確認）', pw2),
+        err, btn),
+      h('p', null, h('button', { type: 'button', class: 'btn secondary block', onclick: () => renderLogin() }, 'ログイン画面に戻る'))));
+    tok.focus();
   }
 
   // 右上の「文字」ボタン：押すと 標準・大・特大 を選べる
