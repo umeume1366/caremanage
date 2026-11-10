@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <!-- 外部スクリプトを一切読み込まない設定（不正スクリプト対策） -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; frame-src blob:; connect-src 'self' https://*.workers.dev http://localhost:8787 http://127.0.0.1:8787; base-uri 'none'; form-action 'none'">
+  <title>ケアつなぎ</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" aria-live="polite"></div>
+  <div id="toast" role="status" aria-live="assertive"></div>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
