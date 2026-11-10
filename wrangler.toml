@@ -1,5 +1,5 @@
 name = "caremanage"  # Cloudflare 上の Worker 名と同じにする
-main = "src/index.js"
+main = "index.js"
 compatibility_date = "2025-09-01"
 
 # 個人情報を扱うため、ログ出力は最小限にしています
