@@ -5,24 +5,10 @@ compatibility_date = "2025-09-01"
 [observability]
 enabled = true
 
-# ▼ 書き換えが必要なのは、この下の2か所だけです ▼
-
 [vars]
-# ① GitHub Pages のアドレス（https:// から、最後の / なし）。違っていたら書き換え
 ALLOWED_ORIGINS = "https://umeume1366.github.io"
-# 添付ファイルの保存先。最初は "d1"。利用者が増えたら "r2"（手順書の「R2への切り替え」参照）
 FILE_STORAGE = "d1"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "caremane-share"
-# ② D1 の画面に出ている「データベース ID」に書き換え
-database_id = "ea9ac275-8883-4cf3-b5ab-ea5be218f229"
-
-# R2 に切り替えるときは、下の3行の先頭の # を消す
-# [[r2_buckets]]
-# binding = "FILES"
-# bucket_name = "caremane-files"
-
-# 暗号鍵（DATA_KEY）とセットアップキー（SETUP_TOKEN）は、ここには書きません。
-# Cloudflare の画面で「シークレット」として登録します。
