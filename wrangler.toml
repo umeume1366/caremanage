@@ -17,7 +17,7 @@ FILE_STORAGE = "d1"
 binding = "DB"
 database_name = "caremane-share"
 # ② D1 の画面に出ている「データベース ID」に書き換え
-database_id = "ここにデータベースIDを貼り付け"
+database_id = "ea9ac275-8883-4cf3-b5ab-ea5be218f229"
 
 # R2 に切り替えるときは、下の3行の先頭の # を消す
 # [[r2_buckets]]
