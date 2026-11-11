@@ -17,8 +17,8 @@
       { id: 4, name: 'あおぞらヘルパーステーション', service_type: '訪問介護', can_post: true, active: true },
       { id: 5, name: 'デイサービスこもれび', service_type: '通所介護', can_post: true, active: true },
       { id: 6, name: 'けやき訪問看護', service_type: '訪問看護', can_post: false, active: true },
-      { id: 7, name: 'あおば福祉用具', service_type: '福祉用具', can_post: false, active: true },
-      { id: 8, name: 'ショートステイ松風', service_type: '短期入所', can_post: false, active: true },
+      { id: 7, name: 'あおば福祉用具', service_type: '福祉用具貸与', can_post: false, active: true },
+      { id: 8, name: 'ショートステイ松風', service_type: '短期入所生活介護', can_post: false, active: true },
     ],
     clients: [],
     messages: [],
@@ -228,6 +228,23 @@
       });
     }
     if (u.role !== 'cm') return err(403, 'この操作はケアマネジャーのみ可能です');
+    // 事業所の名簿（デモでは、どの県・種別でも同じ見本を出します）
+    if (path.startsWith('/api/directory/')) {
+      const type = q.get('type') || '';
+      const none = ['居宅療養管理指導', '住宅改修', 'その他'].includes(type);
+      const cities = ['葵区', '駿河区', '清水区'];
+      const names = ['あさひ', 'ふじのくに', 'みかん', 'お茶の里', 'するが', 'しみず', 'はごろも', 'やまびこ'];
+      const all = none ? [] : cities.flatMap((c, i) => names.slice(0, 5 + i).map((n, k) => ({
+        city: '見本市' + c, name: `${n}${type.replace(/（.*$/, '')}（見本）`, address: `見本市${c}見本町${k + 1}-${i + 1}`, tel: `054-000-${String(1000 + i * 10 + k)}`, office_no: `22${i}${k}000000`,
+      })));
+      if (path === '/api/directory/status') return ok({ available: !none, codes: none ? [] : ['000'], missing: [], count: all.length, imported_at: Date.now() - 86400000 });
+      if (path === '/api/directory/cities') return ok({ cities: [...new Set(all.map((x) => x.city))].map((c) => ({ city: c, n: all.filter((x) => x.city === c).length })) });
+      if (path === '/api/directory/list') {
+        const c = q.get('city'), kw = (q.get('q') || '').trim();
+        return ok({ offices: all.filter((x) => (!c || x.city === c) && (!kw || x.name.includes(kw))) });
+      }
+      return ok({ ok: true });
+    }
     if (path === '/api/offices' && method === 'GET') {
       return ok({ offices: db.offices.map((o) => ({ ...o, client_count: db.clients.filter((c) => !c.archived && c.office_ids.includes(o.id)).length })) });
     }

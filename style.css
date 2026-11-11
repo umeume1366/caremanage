@@ -345,3 +345,31 @@ img, video { max-width: 100%; }
   html[data-size="large"] { font-size: 18px; }
   html[data-size="xlarge"] { font-size: 21px; }
 }
+
+/* ---------- サービス種別をすべて並べる ---------- */
+.chip.none { opacity: .6; border-style: dashed; }
+.chip.none[aria-pressed="true"] { opacity: 1; }
+@media (min-width: 601px) {
+  .typebar { flex-wrap: wrap; overflow-x: visible; }
+  .typebar .chip { min-height: 2.1rem; padding: .1rem .8rem; font-size: .85rem; }
+}
+@media (max-width: 600px) {
+  .typebar .chip { font-size: .9rem; }
+}
+
+/* ---------- 事業所を一覧からえらぶ ---------- */
+.picker { padding: .8rem; margin: 0 0 1rem; min-width: 0; }
+.picker legend { font-weight: 800; padding: 0 .4rem; }
+.picker input[type="search"] { width: 100%; min-height: 2.5rem; padding: .3rem .9rem; border: 2px solid #888; border-radius: 2rem; background: #fff; }
+.pickbox { margin-top: .6rem; }
+.pickbox p { margin: .3rem 0; }
+.picklist { list-style: none; margin: .4rem 0 0; padding: 0; max-height: 16rem; overflow-y: auto; border: 2px solid var(--line); border-radius: .6rem; }
+.picklist li + li { border-top: 1px solid var(--line); }
+.picklist button { display: block; width: 100%; text-align: left; padding: .55rem .7rem; border: none; background: #fff; cursor: pointer; }
+.picklist button b { display: block; }
+.picklist button .hint { display: block; font-size: .78rem; overflow-wrap: anywhere; }
+.picklist button:hover { background: var(--brand-soft); }
+.picklist button[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); }
+.picklist button[aria-pressed="true"] .hint { color: var(--on-brand); }
+.picklist button[aria-pressed="true"] b::before { content: "✓ "; }
+select:disabled { opacity: .5; }

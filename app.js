@@ -23,9 +23,9 @@
   function safeSet(store, k, v) { try { v == null ? store.removeItem(k) : store.setItem(k, v); } catch { /* 無視 */ } }
 
   // ---------- 文字サイズ ----------
-  const SIZES = [['normal', '標準'], ['large', '大'], ['xlarge', '特大']];
+  const SIZES = [['large', '大'], ['normal', '通常']];
   function applySize(s) { document.documentElement.dataset.size = s; safeSet(localStorage, 'size', s); }
-  applySize(safeGet(localStorage, 'size') || 'large');
+  applySize(safeGet(localStorage, 'size') === 'normal' ? 'normal' : 'large');
 
   // ---------- DOM ヘルパー（textContent のみ使用：画面への不正なHTML挿入を防ぐ） ----------
   function h(tag, attrs, ...children) {
@@ -237,30 +237,18 @@
     tok.focus();
   }
 
-  // 右上の「文字」ボタン：押すと 標準・大・特大 を選べる
+  // 右上の「文字」ボタン：押すたびに 大 ⇔ 通常 が切り替わる
   function sizeButton(light) {
-    const label = () => (SIZES.find(([k]) => k === document.documentElement.dataset.size) || SIZES[1])[1];
+    const label = () => (document.documentElement.dataset.size === 'normal' ? '通常' : '大');
     const cur = h('span', { class: 'cur' }, label());
-    const btn = h('button', { type: 'button', class: 'sizebtn' + (light ? ' light' : ''), 'aria-haspopup': 'true', 'aria-expanded': 'false', 'aria-label': `文字の大きさ（いまは${label()}）` },
+    const btn = h('button', { type: 'button', class: 'sizebtn' + (light ? ' light' : ''), 'aria-label': `文字の大きさ（いまは${label()}。押すと切り替わります）` },
       h('span', { class: 'aa', 'aria-hidden': 'true' }, 'あ'), '文字', cur);
-    const wrap = h('div', { class: 'sizewrap' }, btn);
-    let panel = null;
-    const close = () => { if (panel) { panel.remove(); panel = null; btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', outside, true); } };
-    const outside = (e) => { if (!wrap.contains(e.target)) close(); };
     btn.addEventListener('click', () => {
-      if (panel) return close();
-      const now = document.documentElement.dataset.size;
-      panel = h('div', { class: 'sizepanel', role: 'group', 'aria-label': '文字の大きさ' },
-        h('div', { class: 'ttl' }, '文字の大きさ'),
-        SIZES.map(([k, l], i) => h('button', {
-          type: 'button', class: 'opt s' + i, 'aria-pressed': String(now === k),
-          onclick: () => { applySize(k); document.querySelectorAll('.sizebtn .cur').forEach((x) => { x.textContent = l; }); close(); },
-        }, l)));
-      wrap.append(panel);
-      btn.setAttribute('aria-expanded', 'true');
-      setTimeout(() => document.addEventListener('click', outside, true));
+      applySize(document.documentElement.dataset.size === 'normal' ? 'large' : 'normal');
+      document.querySelectorAll('.sizebtn .cur').forEach((x) => { x.textContent = label(); });
+      document.querySelectorAll('.sizebtn').forEach((x) => { x.setAttribute('aria-label', `文字の大きさ（いまは${label()}。押すと切り替わります）`); });
     });
-    return wrap;
+    return h('div', { class: 'sizewrap' }, btn);
   }
 
   // ---------- パスワード変更 ----------
@@ -302,9 +290,16 @@
   }
 
   // ---------- サービス種別 ----------
-  const MAIN_TYPES = ['通所介護', '訪問介護', '訪問看護'];
-  const ALL_TYPES = ['通所介護', '訪問介護', '訪問看護', '訪問入浴', '訪問リハビリ', '通所リハビリ', '短期入所', '福祉用具', '居宅療養管理指導', '小規模多機能', 'その他'];
-  const TYPE_CLASS = { 通所介護: 't-day', 訪問介護: 't-home', 訪問看護: 't-nurse' };
+  // 介護保険のサービス種別（すべて）。サーバー側（index.js）と同じ並びにしています
+  const ALL_TYPES = ['通所介護', '訪問介護', '訪問看護', '訪問入浴介護', '訪問リハビリテーション', '居宅療養管理指導', '通所リハビリテーション',
+    '短期入所生活介護', '短期入所療養介護', '特定施設入居者生活介護', '福祉用具貸与', '特定福祉用具販売', '住宅改修', '居宅介護支援',
+    '定期巡回・随時対応型訪問介護看護', '夜間対応型訪問介護', '地域密着型通所介護', '認知症対応型通所介護', '小規模多機能型居宅介護',
+    '看護小規模多機能型居宅介護', '認知症対応型共同生活介護（グループホーム）', '地域密着型特定施設入居者生活介護', '地域密着型介護老人福祉施設',
+    '介護老人福祉施設（特養）', '介護老人保健施設（老健）', '介護医療院', 'その他'];
+  // 公開データ（名簿）がない種別
+  const NO_DIRECTORY = ['居宅療養管理指導', '住宅改修', 'その他'];
+  const TYPE_CLASS = { 通所介護: 't-day', 地域密着型通所介護: 't-day', 認知症対応型通所介護: 't-day', 訪問介護: 't-home', 夜間対応型訪問介護: 't-home', 訪問看護: 't-nurse' };
+  const PREFS = ['北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県', '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県', '新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県', '岐阜県', '静岡県', '愛知県', '三重県', '滋賀県', '京都府', '大阪府', '兵庫県', '奈良県', '和歌山県', '鳥取県', '島根県', '岡山県', '広島県', '山口県', '徳島県', '香川県', '愛媛県', '高知県', '福岡県', '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県'];
   function typeTag(t) { return h('span', { class: 'stype ' + (TYPE_CLASS[t] || 't-other') }, t || 'その他'); }
   function officeLabel(o) { return `${o.service_type ? o.service_type + '：' : ''}${o.name}`; }
 
@@ -325,12 +320,11 @@
 
     let offices = [], rooms = [];
     function drawChips() {
-      const used = new Set(offices.filter((o) => o.active).map((o) => o.service_type));
-      const types = [...MAIN_TYPES, ...ALL_TYPES.filter((t) => !MAIN_TYPES.includes(t) && used.has(t))];
+      const types = ALL_TYPES;
       const count = (t) => offices.filter((o) => o.active && o.service_type === t).length;
       fill(chipBox,
         h('button', { type: 'button', class: 'chip', 'aria-pressed': String(S.svc === 'all'), onclick: () => setSvc('all') }, 'すべて'),
-        types.map((t) => h('button', { type: 'button', class: 'chip ' + (TYPE_CLASS[t] || 't-other'), 'aria-pressed': String(S.svc === t), onclick: () => setSvc(t) },
+        types.map((t) => h('button', { type: 'button', class: 'chip ' + (TYPE_CLASS[t] || 't-other') + (count(t) ? '' : ' none'), 'aria-pressed': String(S.svc === t), onclick: () => setSvc(t) },
           t, h('span', { class: 'cnt' }, `${count(t)}`))));
     }
     function setSvc(t) { S.svc = t; drawChips(); load(); }
@@ -677,6 +671,56 @@
   }
   const reload = () => route();
 
+  // ---------- 事業所の名簿（厚生労働省の公開データ）を取り込む ----------
+  // CSV の1行を項目に分ける（"..." で囲まれた項目の中のカンマ・改行にも対応）
+  function parseCsv(text, onRow) {
+    let row = [], cell = '', inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inQ) {
+        if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else inQ = false; } else cell += ch;
+      } else if (ch === '"') inQ = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n') { row.push(cell); cell = ''; onRow(row); row = []; }
+      else if (ch !== '\r') cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); onRow(row); }
+  }
+  async function importDirectory(pref, type, codes, progress) {
+    for (let k = 0; k < codes.length; k++) {
+      const code = codes[k];
+      const step = codes.length > 1 ? `（${k + 1}/${codes.length}）` : '';
+      progress(`${pref}の「${type}」の名簿を、厚生労働省の公開データから取得しています${step}… 1分ほどかかることがあります。`);
+      let res;
+      try {
+        res = await fetch(API + '/api/directory/source?code=' + code, { headers: { Authorization: 'Bearer ' + S.token }, credentials: 'omit', cache: 'no-store' });
+      } catch { throw new Error('名簿を取得できませんでした。電波の状態を確認してください'); }
+      if (!res.ok) { let d = {}; try { d = await res.json(); } catch { /* 空 */ } throw new Error(d.error || '名簿を取得できませんでした'); }
+      const source = decodeURIComponent(res.headers.get('X-Source') || '');
+      const buf = await res.arrayBuffer();
+      let text;
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { text = new TextDecoder('shift_jis').decode(buf); }
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      progress(`${pref}の事業所をえらび出しています${step}…`);
+      let col = null; const rows = [];
+      parseCsv(text, (r) => {
+        if (!col) {
+          const at = (...names) => r.findIndex((x) => names.some((n) => x.trim().startsWith(n)));
+          col = { pref: at('都道府県名'), city: at('市区町村名'), name: at('事業所名'), addr: at('住所'), bld: at('方書'), tel: at('電話番号'), no: at('事業所番号') };
+          if (col.pref < 0 || col.city < 0 || col.name < 0) throw new Error('公開データの形式が変わったため、取り込めませんでした');
+          return;
+        }
+        if ((r[col.pref] || '').trim() !== pref) return;
+        rows.push([r[col.city] || '', r[col.name] || '', ((r[col.addr] || '') + ' ' + (r[col.bld] || '')).trim(), r[col.tel] || '', r[col.no] || '']);
+      });
+      const SIZE = 300;
+      for (let i = 0; i === 0 || i < rows.length; i += SIZE) {
+        progress(`保存しています${step}… ${Math.min(i + SIZE, rows.length)} / ${rows.length}件`);
+        await api('POST', '/api/directory/import', { pref, code, reset: i === 0, done: i + SIZE >= rows.length, source, rows: rows.slice(i, i + SIZE) });
+      }
+    }
+  }
+
   async function manageOffices(body) {
     const { offices } = await api('GET', '/api/offices');
     const openForm = (o) => {
@@ -684,23 +728,88 @@
       const svc = h('select', null, ALL_TYPES.map((t) => h('option', { value: t, selected: (o?.service_type || (S.svc !== 'all' ? S.svc : '訪問介護')) === t }, t)));
       const canPost = h('input', { type: 'checkbox', checked: o?.can_post });
       const err = h('p', { class: 'error' });
+      // 新しく追加するときだけ：県 → 市区町村 → 名簿からえらぶ
+      const pref = h('select', null, h('option', { value: '' }, '（都道府県をえらぶ）'), PREFS.map((x) => h('option', { value: x, selected: safeGet(localStorage, 'pref') === x }, x)));
+      const city = h('select', { disabled: true }, h('option', { value: '' }, '（市区町村をえらぶ）'));
+      const kw = h('input', { type: 'search', placeholder: '🔍 事業所名でさがす', 'aria-label': '事業所名でさがす' });
+      const pickBox = h('div', { class: 'pickbox' });
+      let seq = 0;
+      const note = (text, cls) => fill(pickBox, h('p', { class: cls || 'hint' }, text));
+      async function showList() {
+        const my = ++seq;
+        const q = new URLSearchParams({ pref: pref.value, type: svc.value, city: city.value, q: kw.value.trim() });
+        try {
+          const { offices: list } = await api('GET', '/api/directory/list?' + q);
+          if (my !== seq) return;
+          if (!list.length) return note('該当する事業所が見つかりません。下の「事業所名」に直接入力して追加できます。');
+          fill(pickBox,
+            h('p', { class: 'hint' }, `${list.length >= 300 ? '300件以上' : list.length + '件'}。追加したい事業所を押してください。`),
+            h('ul', { class: 'picklist' }, list.map((d) => h('li', null, h('button', {
+              type: 'button', 'aria-pressed': String(name.value === d.name),
+              onclick: (e) => {
+                name.value = d.name.slice(0, 60);
+                pickBox.querySelectorAll('button[aria-pressed]').forEach((x) => x.setAttribute('aria-pressed', 'false'));
+                e.currentTarget.setAttribute('aria-pressed', 'true');
+              },
+            }, h('b', null, d.name), h('span', { class: 'hint' }, [city.value ? '' : d.city, d.address, d.tel].filter(Boolean).join('　')))))));
+        } catch (ex) { if (my === seq) note(ex.message, 'error'); }
+      }
+      async function refresh(forceImport) {
+        const my = ++seq;
+        city.disabled = true; fill(city, h('option', { value: '' }, '（市区町村をえらぶ）'));
+        if (!pref.value) return note('都道府県をえらぶと、その地域の事業所が一覧で出ます。');
+        safeSet(localStorage, 'pref', pref.value);
+        if (NO_DIRECTORY.includes(svc.value)) return note('この種別は公開されている名簿がありません。下の「事業所名」に直接入力してください。');
+        note('確認しています…');
+        try {
+          const q = new URLSearchParams({ pref: pref.value, type: svc.value });
+          let st = await api('GET', '/api/directory/status?' + q);
+          if (my !== seq) return;
+          if (!st.available) return note('この種別は公開されている名簿がありません。下の「事業所名」に直接入力してください。');
+          const codes = forceImport ? st.codes : st.missing;
+          if (codes.length) {
+            await importDirectory(pref.value, svc.value, codes, (t) => { if (my === seq) note(t); });
+            if (my !== seq) return;
+            st = await api('GET', '/api/directory/status?' + q);
+          }
+          const { cities } = await api('GET', '/api/directory/cities?' + q);
+          if (my !== seq) return;
+          if (!cities.length) return note(`${pref.value}には、この種別の事業所が公開データにありません。下の「事業所名」に直接入力してください。`);
+          fill(city, h('option', { value: '' }, `（市区町村をえらぶ：全${st.count}件）`), cities.map((c) => h('option', { value: c.city }, `${c.city}（${c.n}）`)));
+          city.disabled = false;
+          fill(pickBox,
+            h('p', { class: 'hint' }, '市区町村をえらぶか、事業所名でさがしてください。'),
+            h('p', { class: 'hint' }, `名簿：厚生労働省 介護サービス情報公表システム（${fmtFull(st.imported_at)} 取り込み）　`,
+              h('button', { type: 'button', class: 'linkbtn', onclick: () => refresh(true) }, '最新の名簿に更新')));
+        } catch (ex) { if (my === seq) note(ex.message, 'error'); }
+      }
+      let kwTimer = null;
+      pref.addEventListener('change', () => refresh(false));
+      svc.addEventListener('change', () => { if (!o) refresh(false); });
+      city.addEventListener('change', () => { if (city.value || kw.value.trim()) showList(); });
+      kw.addEventListener('input', () => { clearTimeout(kwTimer); kwTimer = setTimeout(() => { if (pref.value && (city.value || kw.value.trim())) showList(); }, 400); });
       dialog(o ? '事業所を編集' : '事業所を追加', h('div', null,
         h('label', { class: 'field' }, 'サービス種別', svc),
-        h('label', { class: 'field' }, '事業所名', name),
+        o ? null : h('fieldset', { class: 'card picker' }, h('legend', null, '一覧からえらぶ'),
+          h('label', { class: 'field' }, '都道府県', pref),
+          h('label', { class: 'field' }, '市区町村', city),
+          kw, pickBox),
+        h('label', { class: 'field' }, '事業所名', o ? null : h('span', { class: 'hint' }, '（一覧にない新しい事業所は、ここに直接入力できます）'), name),
         h('label', { class: 'check' }, canPost, '事業所からの返信を許可する'),
         h('p', { class: 'hint' }, 'チェックしない場合、事業所は「閲覧のみ」になります。'), err),
       (close) => [
-        h('button', { class: 'btn secondary', onclick: close }, 'やめる'),
+        h('button', { class: 'btn secondary', onclick: () => { seq++; close(); } }, 'やめる'),
         h('button', {
           class: 'btn', onclick: async () => {
             try {
               if (o) await api('PATCH', '/api/offices/' + o.id, { name: name.value, service_type: svc.value, can_post: canPost.checked });
               else await api('POST', '/api/offices', { name: name.value, service_type: svc.value, can_post: canPost.checked });
-              close(); toast('保存しました'); reload();
+              seq++; close(); toast('保存しました'); reload();
             } catch (ex) { err.textContent = ex.message; }
           },
         }, '保存'),
       ]);
+      if (!o) refresh(false);
     };
     fill(body, 
       h('p', null, h('button', { class: 'btn block', onclick: () => openForm(null) }, '＋ 事業所を追加')),
