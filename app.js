@@ -101,7 +101,7 @@
 
   function logoutLocal(msg) {
     clearTimers();
-    S.token = null; S.user = null; S.q = ''; S.svc = 'all';
+    S.token = null; S.user = null; S.q = ''; S.svc = 'all'; S.clientDraft = null;
     blobCache.clear();
     safeSet(sessionStorage, 'token', null);
     if (MEM) memHash = '#/';
@@ -119,9 +119,10 @@
   }, 30 * 1000);
 
   // ---------- 画面共通 ----------
-  function topbar(title, { back, sub, right } = {}) {
+  function topbar(title, { back, sub, right, dog } = {}) {
     return h('header', { class: 'topbar' },
       back ? h('button', { class: 'iconbtn', 'aria-label': '戻る', onclick: back }, '＜ 戻る') : null,
+      dog ? h('span', { class: 'dog small', 'aria-hidden': 'true' }) : null,
       h('h1', null, title, sub ? h('span', { class: 'sub' }, sub) : null),
       h('div', { class: 'top-right' }, sizeButton(), right || null),
     );
@@ -322,7 +323,7 @@
     const isCm = S.user.role === 'cm';
     if (!S.svc) S.svc = 'all';
     const title = isCm ? 'ケアつなぎ' : (S.user.office ? S.user.office.name : 'ケアつなぎ');
-    const listBox = h('div', null, h('p', { class: 'empty' }, '読み込み中…'));
+    const listBox = h('div', null, h('p', { class: 'empty loading' }, '読み込み中…'));
     const tabs = isCm ? h('nav', { class: 'tabs', role: 'tablist' },
       h('button', { role: 'tab', 'aria-selected': String(tab === 'clients'), onclick: () => go('#/') }, '👤 利用者ごと'),
       h('button', { role: 'tab', 'aria-selected': String(tab === 'offices'), onclick: () => go('#/offices') }, '🏢 事業所ごと'),
@@ -330,7 +331,7 @@
     const chipBox = h('div', { class: 'typebar', role: 'group', 'aria-label': 'サービス種別で切り替え' });
     const search = h('input', { type: 'search', id: 'room-search', placeholder: '🔍 名前でさがす', 'aria-label': '利用者の名前でさがす', value: S.q || '' });
     const searchBox = tab === 'clients' && !officeId ? h('div', { class: 'searchbar' }, search) : null;
-    mount(topbar(title, { sub: `${S.user.name} さん`, right: menuButton() }), tabs, isCm && !officeId ? chipBox : null, searchBox, h('main', null, listBox));
+    mount(topbar(title, { sub: `${S.user.name} さん`, right: menuButton(), dog: true }), tabs, isCm && !officeId ? chipBox : null, searchBox, h('main', null, listBox));
 
     let offices = [], rooms = [];
     function drawChips() {
@@ -674,10 +675,11 @@
           h('li', null, h('button', { onclick: () => go('#/manage/clients') }, '👤 利用者の管理')),
           h('li', null, h('button', { onclick: () => go('#/manage/offices') }, '🏢 事業所の管理')),
           h('li', null, h('button', { onclick: () => go('#/manage/accounts') }, '🔑 サービス事業所アカウントの管理'))) : null,
-        h('h2', { class: 'menuhead' }, '安全のための設定・記録'),
-        h('ul', { class: 'menu' },
+        h('details', { class: 'menufold' },
+          h('summary', null, '安全のための設定・記録'),
+          h('ul', { class: 'menu' },
           h('li', null, h('button', { onclick: () => go('#/password') }, '🔒 パスワード変更')),
-          isCm ? h('li', null, h('button', { onclick: () => go('#/manage/audit') }, '📋 操作の記録（監査ログ）', h('span', { class: 'hint' }, 'だれが・いつ見たかを確認できます'))) : null),
+          isCm ? h('li', null, h('button', { onclick: () => go('#/manage/audit') }, '📋 操作の記録（監査ログ）', h('span', { class: 'hint' }, 'だれが・いつ見たかを確認できます'))) : null)),
         h('ul', { class: 'menu last' },
           h('li', null, h('button', { onclick: doLogout }, '🚪 ログアウト')))));
   }
@@ -685,7 +687,7 @@
   // ---------- 管理（ケアマネのみ） ----------
   async function renderManage(section) {
     const titles = { clients: '利用者の管理', offices: '事業所の管理', accounts: 'サービス事業所アカウント', audit: '操作の記録' };
-    const body = h('main', { class: 'page' }, h('p', { class: 'empty' }, '読み込み中…'));
+    const body = h('main', { class: 'page' }, h('p', { class: 'empty loading' }, '読み込み中…'));
     mount(topbar(titles[section] || '管理', { back: () => go('#/menu') }), body);
     try {
       if (section === 'offices') await manageOffices(body);
@@ -827,6 +829,7 @@
       city.addEventListener('change', () => { if (!city.disabled) showList(); });
       kw.addEventListener('input', () => { if (!city.disabled) showList(); });
       dialog(o ? '事業所を編集' : '事業所を追加', h('div', null,
+        !o && S.clientDraft ? h('p', { class: 'testnote' }, '保存すると、利用者の入力画面に戻ります。入力した内容はそのまま残っています。') : null,
         h('label', { class: 'field' }, 'サービス種別', svc),
         o ? null : h('fieldset', { class: 'card picker' }, h('legend', null, '一覧からえらぶ'),
           h('label', { class: 'field' }, '都道府県', pref),
@@ -836,12 +839,16 @@
         h('label', { class: 'check' }, canPost, '事業所からの返信を許可する'),
         h('p', { class: 'hint' }, 'チェックしない場合、事業所は「閲覧のみ」になります。'), err),
       (close) => [
-        h('button', { class: 'btn secondary', onclick: () => { seq++; close(); } }, 'やめる'),
+        h('button', { class: 'btn secondary', onclick: () => { seq++; close(); if (S.clientDraft) go('#/manage/clients'); } }, S.clientDraft ? '利用者の入力に戻る' : 'やめる'),
         h('button', {
           class: 'btn', onclick: async () => {
             try {
               if (o) await api('PATCH', '/api/offices/' + o.id, { name: name.value, service_type: svc.value, can_post: canPost.checked });
-              else await api('POST', '/api/offices', { name: name.value, service_type: svc.value, can_post: canPost.checked });
+              else {
+                const made = await api('POST', '/api/offices', { name: name.value, service_type: svc.value, can_post: canPost.checked });
+                // 利用者の入力の途中から来たときは、追加した事業所にチェックを入れて元の画面に戻る
+                if (S.clientDraft) { S.clientDraft.office_ids.push(made.id); seq++; close(); toast('事業所を追加しました。利用者の入力に戻ります'); go('#/manage/clients'); return; }
+              }
               seq++; close(); toast('保存しました'); reload();
             } catch (ex) { err.textContent = ex.message; }
           },
@@ -849,6 +856,7 @@
       ]);
       if (!o) refresh(false);
     };
+    if (S.clientDraft) setTimeout(() => openForm(null));
     fill(body, 
       h('p', null, h('button', { class: 'btn block', onclick: () => openForm(null) }, '＋ 事業所を追加')),
       offices.length ? offices.map((o) => h('div', { class: 'card' },
@@ -878,19 +886,27 @@
   async function manageClients(body) {
     const [{ clients }, { offices }] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/offices')]);
     const officeName = new Map(offices.map((o) => [o.id, officeLabel(o)]));
-    const openForm = (c) => {
-      const name = h('input', { type: 'text', value: c?.name || '', maxlength: '50' });
-      const note = h('textarea', { rows: '3', maxlength: '500' }, c?.note || '');
-      const checks = offices.filter((o) => o.active).map((o) => h('input', { type: 'checkbox', value: String(o.id), checked: c?.office_ids.includes(o.id) }));
+    const openForm = (c, draft) => {
+      const name = h('input', { type: 'text', value: draft ? draft.name : (c?.name || ''), maxlength: '50' });
+      const note = h('textarea', { rows: '3', maxlength: '500' }, draft ? draft.note : (c?.note || ''));
+      const picked = draft ? draft.office_ids : (c?.office_ids || []);
+      const checks = offices.filter((o) => o.active).map((o) => h('input', { type: 'checkbox', value: String(o.id), checked: picked.includes(o.id) }));
       const err = h('p', { class: 'error' });
+      let closeForm = () => {};
+      // 入力の途中で「サービス事業所を追加」へ進む（入力した内容は覚えておき、戻ったときに元に戻す）
+      const toOffice = () => {
+        S.clientDraft = { id: c ? c.id : null, name: name.value, note: note.value, office_ids: checks.filter((x) => x.checked).map((x) => Number(x.value)) };
+        closeForm(); go('#/manage/offices');
+      };
       dialog(c ? '利用者を編集' : '利用者を追加', h('div', null,
         h('label', { class: 'field' }, '氏名', name),
         h('label', { class: 'field' }, 'メモ（ケアマネのみ閲覧）', note),
         h('fieldset', { class: 'card' }, h('legend', null, '共有する事業所'),
-          checks.length ? checks.map((cb) => h('label', { class: 'check' }, cb, officeName.get(Number(cb.value)))) : h('p', { class: 'hint' }, '先に事業所を登録してください')),
+          checks.length ? checks.map((cb) => h('label', { class: 'check' }, cb, officeName.get(Number(cb.value)))) : h('p', { class: 'hint' }, 'まだ事業所が登録されていません。下のボタンから追加できます。'),
+          h('p', { class: 'addoffice' }, h('button', { type: 'button', class: 'btn secondary block', onclick: toOffice }, '＋ サービス事業所を追加'))),
         err),
       (close) => [
-        h('button', { class: 'btn secondary', onclick: close }, 'やめる'),
+        (closeForm = close, h('button', { class: 'btn secondary', onclick: close }, 'やめる')),
         h('button', {
           class: 'btn', onclick: async () => {
             const payload = { name: name.value, note: note.value, office_ids: checks.filter((x) => x.checked).map((x) => Number(x.value)) };
@@ -903,6 +919,10 @@
         }, '保存'),
       ]);
     };
+    if (S.clientDraft) {
+      const d = S.clientDraft; S.clientDraft = null;
+      setTimeout(() => openForm(d.id ? clients.find((x) => x.id === d.id) || null : null, d));
+    }
     fill(body, 
       h('p', null, h('button', { class: 'btn block', onclick: () => openForm(null) }, '＋ 利用者を追加')),
       clients.length ? clients.map((c) => h('div', { class: 'card' },
