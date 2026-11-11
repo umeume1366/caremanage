@@ -41,29 +41,118 @@
   function useUserSize(u) { if (u && sizeOk(u.font_size)) applySize(u.font_size); }
 
   // ---------- アプリとして使う（PWA：ホーム画面に追加） ----------
+  // ・Android（Chrome など）：ボタンを押すと、その場で「インストール」の確認が出る
+  //   ※ Chrome の決まりで、ページを開いてから30秒ほどたたないと確認を出せない。そのあいだは「準備中」と表示して待つ
+  // ・iPhone / iPad：Apple の決まりで、ボタンから直接は追加できない。共有ボタンからの3つの手順を、使っているブラウザに合わせて案内する
+  // ・LINE などの「アプリの中の画面」：ホーム画面に追加できないので、Chrome / Safari で開き直す案内を出す
   let installEvent = null;
+  const installWaiters = new Set();
+  const UA = navigator.userAgent;
   const isApp = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
-  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvent = e; });
-  addEventListener('appinstalled', () => { installEvent = null; toast('ホーム画面に追加しました'); });
+  const isIOS = () => /iPhone|iPad|iPod/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = () => /Android/i.test(UA);
+  function inAppName() {
+    if (/\bLine\//i.test(UA)) return 'LINE';
+    if (/FBAN|FBAV|FB_IAB/.test(UA)) return 'Facebook';
+    if (/Instagram/i.test(UA)) return 'Instagram';
+    if (/MicroMessenger|KAKAOTALK|Twitter/i.test(UA)) return 'アプリ';
+    if (isAndroid() && /; wv\)/.test(UA)) return 'アプリ';
+    if (isIOS() && !/Safari\//.test(UA)) return 'アプリ';
+    return '';
+  }
+  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvent = e; installWaiters.forEach((fn) => fn()); });
+  addEventListener('appinstalled', () => { installEvent = null; document.querySelectorAll('.overlay.install').forEach((o) => o.remove()); toast('ホーム画面に追加しました'); });
   if ('serviceWorker' in navigator && window.isSecureContext) {
     addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* 使えなくても画面は動く */ }); });
   }
-  async function installApp() {
-    if (installEvent) {
-      installEvent.prompt();
-      try { await installEvent.userChoice; } catch { /* 無視 */ }
-      installEvent = null;
-      return;
+  // その場で「インストール」の確認を出す
+  async function promptInstall() {
+    const ev = installEvent; installEvent = null;
+    if (!ev) return;
+    try {
+      ev.prompt();
+      const choice = await ev.userChoice;
+      if (choice && choice.outcome === 'dismissed') toast('追加をやめました。もう一度押すと追加できます');
+    } catch { /* 無視 */ }
+  }
+  const stepList = (steps) => h('ol', { class: 'steps' }, steps.map((t) => h('li', null, t)));
+  const shareIcon = () => h('span', { class: 'ico-share', role: 'img', 'aria-label': '共有ボタン（四角から上向きの矢印が出ているマーク）' });
+  function pageUrl() { return location.href.split('#')[0]; }
+  function urlBox() {
+    const box = h('input', { type: 'text', readonly: true, class: 'urlbox', value: pageUrl(), 'aria-label': 'このページのアドレス', onfocus: (e) => e.target.select() });
+    const btn = h('button', { type: 'button', class: 'btn secondary block', onclick: async () => {
+      try { await navigator.clipboard.writeText(pageUrl()); toast('アドレスをコピーしました'); } catch { box.focus(); box.select(); toast('アドレスを長押ししてコピーしてください'); }
+    } }, 'アドレスをコピーする');
+    return h('div', { class: 'urlrow' }, box, btn);
+  }
+  function installDialog(body, actions) {
+    const close = dialog('ホーム画面に追加', body, actions);
+    const ov = [...document.querySelectorAll('.overlay')].pop();
+    if (ov) ov.classList.add('install');
+    return close;
+  }
+
+  function installApp() {
+    // 1) すぐに追加できる状態（Android の Chrome・パソコンの Chrome / Edge など）
+    if (installEvent) return promptInstall();
+
+    // 2) LINE などのアプリの中で開いている
+    const inApp = inAppName();
+    if (inApp) {
+      const name = inApp === 'アプリ' ? 'ほかのアプリ' : inApp;
+      const target = isIOS() ? 'Safari' : 'Chrome';
+      const u = pageUrl();
+      const open = inApp === 'LINE'
+        ? h('a', { class: 'btn block', href: u + (u.includes('?') ? '&' : '?') + 'openExternalBrowser=1' }, `${target} などのブラウザで開く`)
+        : isAndroid()
+          ? h('a', { class: 'btn block', href: 'intent://' + u.replace(/^https?:\/\//, '') + '#Intent;scheme=https;package=com.android.chrome;end' }, 'Chrome で開く')
+          : null;
+      return installDialog(h('div', null,
+        h('p', null, `いまは ${name} の中の画面で開いています。このままでは、ホーム画面に追加できません。`),
+        h('p', null, h('b', null, `${target} で開き直すと、追加できます。`)),
+        open ? h('p', null, open) : null,
+        h('p', { class: 'hint' }, open ? 'うまく開かないときは、下のアドレスをコピーして、' + target + ' のアドレス欄に貼り付けてください。' : `下のアドレスをコピーして、${target} のアドレス欄に貼り付けてください。画面のすみのメニューに「${target} で開く」「ブラウザで開く」があれば、それでも開けます。`),
+        urlBox()),
+      (close) => [h('button', { class: 'btn secondary', onclick: close }, '閉じる')]);
     }
-    const steps = isIOS()
-      ? ['画面の下（または上）にある「共有」ボタン（□に↑のマーク）を押します。', '下へ動かして「ホーム画面に追加」を押します。', '右上の「追加」を押します。']
-      : ['画面の右上（または下）の「︙」メニューを押します。', '「ホーム画面に追加」または「アプリをインストール」を押します。', '「追加」「インストール」を押します。'];
-    dialog('ホーム画面に追加', h('div', null,
-      h('p', null, 'ホーム画面にケアブルのアイコンが置かれ、アプリのようにすぐ開けるようになります。'),
-      h('ol', { class: 'warnlist' }, steps.map((t) => h('li', null, t))),
-      isIOS() ? h('p', { class: 'hint' }, 'iPhone・iPad では Safari で開いてください。') : null),
-    (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
+
+    // 3) iPhone / iPad（Apple の決まりで、ボタンからは直接追加できない）
+    if (isIOS()) {
+      const chrome = /CriOS|EdgiOS/.test(UA);
+      const other = /FxiOS|OPiOS|DuckDuckGo/.test(UA);
+      const steps = chrome
+        ? [['アドレス欄の右はしにある ', shareIcon(), ' を押します。'], ['出てきたメニューを下へ動かして「ホーム画面に追加」を押します。'], ['右上の「追加」を押します。']]
+        : [['画面の下にある ', shareIcon(), ' を押します。', h('span', { class: 'hint' }, '（見当たらないときは「…」を押すと出てきます。iPad は画面の上にあります）')], ['出てきたメニューを下へ動かして「ホーム画面に追加」を押します。'], ['右上の「追加」を押します。']];
+      return installDialog(h('div', null,
+        h('p', null, 'iPhone・iPad は、次の3つの手順でホーム画面に追加できます。'),
+        other ? h('p', { class: 'testnote' }, 'このブラウザでは追加できないことがあります。Safari で開くと確実です。') : null,
+        stepList(steps),
+        h('p', { class: 'hint' }, 'ホーム画面に「ケアブル」のアイコンができ、次からはアプリのように開けます。'),
+        other ? urlBox() : null),
+      (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
+    }
+
+    // 4) Android・パソコン：準備ができしだい、ボタンが押せるようになる
+    const status = h('p', { class: 'installwait', role: 'status' }, h('span', { class: 'spin', 'aria-hidden': 'true' }), '準備しています… 30秒ほどで下のボタンが押せるようになります。');
+    const addBtn = h('button', { type: 'button', class: 'btn block', disabled: true }, 'ホーム画面に追加する');
+    const ready = () => {
+      if (!addBtn.isConnected) { installWaiters.delete(ready); return; }
+      status.className = 'installwait ok'; status.textContent = '✓ 準備ができました。下のボタンを押してください。';
+      addBtn.disabled = false; addBtn.focus();
+    };
+    const manual = isAndroid()
+      ? ['画面の右上（または右下）の「︙」を押します。', '「ホーム画面に追加」または「アプリをインストール」を押します。', '「インストール」または「追加」を押します。']
+      : ['アドレス欄の右はしにあるインストールのマーク（パソコンに↓の絵）を押します。', '見当たらないときは、右上の「︙」→「キャスト、保存、共有」→「ページをアプリとしてインストール」を押します。', '「インストール」を押します。'];
+    const closeDlg = installDialog(h('div', null,
+      status, h('p', null, addBtn),
+      h('details', { class: 'installhelp' },
+        h('summary', null, 'ボタンが押せるようにならないとき'),
+        h('p', { class: 'hint' }, 'すでに追加してある場合は、ボタンは押せるようになりません。ホーム画面の「ケアブル」のアイコンから開いてください。'),
+        h('p', { class: 'hint' }, 'まだ追加していない場合は、次の手順でも追加できます。'),
+        stepList(manual))),
+    (close) => [h('button', { class: 'btn secondary', onclick: () => { installWaiters.delete(ready); close(); } }, '閉じる')]);
+    addBtn.addEventListener('click', async () => { installWaiters.delete(ready); closeDlg(); await promptInstall(); });
+    installWaiters.add(ready);
   }
 
   // ---------- DOM ヘルパー（textContent のみ使用：画面への不正なHTML挿入を防ぐ） ----------
@@ -184,7 +273,7 @@
     ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
     document.addEventListener('keydown', esc);
     document.body.append(ov);
-    const first = ov.querySelector('input, textarea, select');
+    const first = ov.querySelector('input:not([readonly]), textarea, select');
     if (first) first.focus();
     return close;
   }
@@ -295,6 +384,7 @@
     const tok = h('input', { type: 'password', id: 'setup-token', autocomplete: 'off' });
     const name = h('input', { type: 'text', id: 'setup-name', maxlength: '50' });
     const lid = h('input', { type: 'text', id: 'setup-id', autocapitalize: 'off', spellcheck: 'false', maxlength: '64' });
+    const prefSel = h('select', { id: 'setup-pref' }, h('option', { value: '' }, '（都道府県をえらぶ）'), PREFS.map((x) => h('option', { value: x }, x)));
     const pw = h('input', { type: 'password', id: 'setup-pw', autocomplete: 'new-password' });
     const pw2 = h('input', { type: 'password', id: 'setup-pw2', autocomplete: 'new-password' });
     const btn = h('button', { class: 'btn block', type: 'submit' }, '登録する');
@@ -305,16 +395,18 @@
         e.preventDefault(); err.textContent = '';
         lid.value = normId(lid.value);
         if (!/^[A-Za-z0-9._-]{4,64}$/.test(lid.value)) { err.textContent = 'ログインIDは、半角の英字・数字で4文字以上にしてください（例：1234）'; return; }
+        if (!prefSel.value) { err.textContent = '都道府県をえらんでください'; prefSel.focus(); return; }
         if (pw.value.length < 10) { err.textContent = `パスワードは10文字以上にしてください（いま ${pw.value.length}文字です）`; return; }
         if (pw.value !== pw2.value) { err.textContent = 'パスワードが一致しません'; return; }
         btn.disabled = true;
         try {
-          await api('POST', '/api/setup', { setup_token: tok.value, name: name.value, login_id: normId(lid.value), password: pw.value });
+          await api('POST', '/api/setup', { setup_token: tok.value, name: name.value, login_id: normId(lid.value), password: pw.value, pref: prefSel.value });
           renderLogin('登録しました。いま決めたログインIDとパスワードでログインしてください');
         } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
       } },
         h('label', { class: 'field' }, 'セットアップキー', tok),
         h('label', { class: 'field' }, '氏名', name),
+        h('label', { class: 'field' }, '基本の都道府県', h('span', { class: 'hint' }, '（事業所をさがすときに、最初からこの県がえらばれます。あとで変更できます）'), prefSel),
         h('label', { class: 'field' }, 'ログインID', h('span', { class: 'hint' }, '（半角の英字・数字で4文字以上。数字だけでも大丈夫です。例：1234）'), lid),
         h('label', { class: 'field' }, 'パスワード', h('span', { class: 'hint' }, '（10文字以上・英字と数字など2種類以上）'), pw),
         h('label', { class: 'field' }, 'パスワード（確認）', pw2),
@@ -804,7 +896,9 @@
         isCm ? h('ul', { class: 'menu' },
           h('li', null, h('button', { onclick: () => go('#/manage/clients') }, '👤 利用者の管理')),
           h('li', null, h('button', { onclick: () => go('#/manage/offices') }, '🏢 事業所の管理')),
-          h('li', null, h('button', { onclick: () => go('#/manage/accounts') }, '🔑 サービス事業所アカウントの管理'))) : null,
+          h('li', null, h('button', { onclick: () => go('#/manage/accounts') }, '🔑 サービス事業所アカウントの管理')),
+          h('li', null, h('button', { onclick: editPref }, '📍 基本の都道府県',
+            h('span', { class: 'hint' }, S.user.pref ? `いまは「${S.user.pref}」です。押すと変更できます` : 'まだ決まっていません。押すと登録できます')))) : null,
         h('details', { class: 'menufold' },
           h('summary', null, '安全のための設定・記録'),
           h('ul', { class: 'menu' },
@@ -815,6 +909,25 @@
             h('span', { class: 'hint' }, 'アイコンを押すだけで、すぐ開けるようになります')))),
         h('ul', { class: 'menu last' },
           h('li', null, h('button', { onclick: doLogout }, '🚪 ログアウト')))));
+  }
+
+  // 基本の都道府県（事業所をさがすときに、最初からえらばれる県）
+  function editPref() {
+    const sel = h('select', null, h('option', { value: '' }, '（都道府県をえらぶ）'), PREFS.map((x) => h('option', { value: x, selected: S.user.pref === x }, x)));
+    const err = h('p', { class: 'error' });
+    dialog('基本の都道府県', h('div', null,
+      h('p', { class: 'hint' }, '事業所を追加するときに、最初からこの県の名簿が出ます。となりの県の事業所も、追加の画面で県を切り替えればさがせます。'),
+      h('label', { class: 'field' }, '都道府県', sel), err),
+    (close) => [
+      h('button', { class: 'btn secondary', onclick: close }, 'やめる'),
+      h('button', { class: 'btn', onclick: async () => {
+        if (!sel.value) { err.textContent = '都道府県をえらんでください'; return; }
+        try {
+          await api('POST', '/api/me/prefs', { pref: sel.value });
+          S.user.pref = sel.value; close(); toast('保存しました'); route();
+        } catch (ex) { err.textContent = ex.message; }
+      } }, '保存'),
+    ]);
   }
 
   // ---------- つながっているケアマネジャー（事業所のみ） ----------
@@ -924,7 +1037,7 @@
       const canPost = h('input', { type: 'checkbox', checked: o?.can_post });
       const err = h('p', { class: 'error' });
       // 新しく追加するときだけ：県 → 市区町村 → 名簿からえらぶ
-      const pref = h('select', null, h('option', { value: '' }, '（都道府県をえらぶ）'), PREFS.map((x) => h('option', { value: x, selected: safeGet(localStorage, 'pref') === x }, x)));
+      const pref = h('select', null, h('option', { value: '' }, '（都道府県をえらぶ）'), PREFS.map((x) => h('option', { value: x, selected: (S.user.pref || safeGet(localStorage, 'pref')) === x }, x)));
       const city = h('select', { disabled: true }, h('option', { value: '' }, '（市区町村をえらぶ）'));
       const kw = h('input', { type: 'search', placeholder: '🔍 事業所名でさがす', 'aria-label': '事業所名でさがす' });
       const pickBox = h('div', { class: 'pickbox' });
@@ -956,7 +1069,11 @@
         const my = ++seq;
         city.disabled = true; fill(city, h('option', { value: '' }, '（市区町村をえらぶ）'));
         if (!pref.value) return note('都道府県をえらぶと、その地域の事業所が一覧で出ます。');
-        safeSet(localStorage, 'pref', pref.value);
+        // 基本の都道府県がまだ決まっていない人は、最初にえらんだ県をそのまま登録する（次からどの端末でもこの県が出る）
+        if (!S.user.pref) {
+          S.user.pref = pref.value; safeSet(localStorage, 'pref', pref.value);
+          api('POST', '/api/me/prefs', { pref: pref.value }).then(() => toast(`基本の都道府県を「${pref.value}」にしました`)).catch(() => { /* 保存できなくても、この画面では使える */ });
+        }
         if (NO_DIRECTORY.includes(svc.value)) return note('この種別は公開されている名簿がありません。下の「事業所名」に直接入力してください。');
         note('確認しています…');
         try {
@@ -999,7 +1116,7 @@
         !o && S.clientDraft ? h('p', { class: 'testnote' }, '保存すると、利用者の入力画面に戻ります。入力した内容はそのまま残っています。') : null,
         h('label', { class: 'field' }, 'サービス種別', svc),
         o ? null : h('fieldset', { class: 'card picker' }, h('legend', null, '一覧からえらぶ'),
-          h('label', { class: 'field' }, '都道府県', pref),
+          h('label', { class: 'field' }, '都道府県', h('span', { class: 'hint' }, '（となりの県の事業所をさがすときは、ここで切り替えられます）'), pref),
           h('label', { class: 'field' }, '市区町村', city),
           kw, pickBox),
         h('label', { class: 'field' }, '事業所名', o ? null : h('span', { class: 'hint' }, '（一覧にない新しい事業所は、ここに直接入力できます）'), name),

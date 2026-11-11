@@ -6,7 +6,7 @@
 // - 事業所アカウントは1つのIDで複数のケアマネとつながれる（provider_links）。ケアマネごとに承認・停止できる
 // - 監査ログ: ログイン、閲覧、投稿、設定変更を記録
 
-const VERSION = '2026-11-11f';
+const VERSION = '2026-11-11g';
 let lastError = null; // 直近のサーバーエラー（/api/health で確認できる。個人情報は含めない）
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -263,7 +263,7 @@ async function publicUser(env, u) {
     login_id: u.login_id,
     name: await open(env, u.cm_id, u.display_name),
     must_change_pw: !!u.must_change_pw,
-    font_size: (await env.DB.prepare('SELECT font_size FROM user_prefs WHERE user_id = ?').bind(u.id).first())?.font_size || null,
+    ...await userPrefs(env, u.id),
     office,
     ...(u.role === 'provider' ? { links, pending } : {}),
   };
@@ -315,6 +315,12 @@ async function handleLogin(env, req) {
 }
 
 // 登録が途中で止まったケアマネ（cm_id が空）を、使える状態に直す
+// 画面の設定（文字の大きさ・基本の都道府県）
+async function userPrefs(env, userId) {
+  const r = await env.DB.prepare('SELECT font_size, pref FROM user_prefs WHERE user_id = ?').bind(userId).first();
+  return { font_size: r?.font_size || null, pref: r?.pref || null };
+}
+
 async function repairCm(env, user) {
   if (user.role !== 'cm' || user.cm_id != null) return;
   user.cm_id = user.id;
@@ -332,7 +338,10 @@ async function handleSetup(env, req) {
   if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは、半角の英字・数字で4文字以上にしてください（例：1234）');
   checkPasswordPolicy(body.password);
   const name = str(body.name, 50, '氏名');
+  const pref = body.pref == null || body.pref === '' ? null : body.pref;
+  if (pref !== null && !PREFS.includes(pref)) throw new HttpError(400, '都道府県を選んでください');
   await masterKeyBytes(env); // 鍵に問題があれば、何も書き込む前に止める
+  await ensureSchema(env);
   const exists = await env.DB.prepare('SELECT id, role, cm_id FROM users WHERE login_id = ?').bind(loginId).first();
   // 途中で止まった登録（ケアマネなのに cm_id が空）は、同じIDでやり直せる
   const unfinished = exists && exists.role === 'cm' && exists.cm_id == null;
@@ -349,6 +358,9 @@ async function handleSetup(env, req) {
     id = r.meta.last_row_id;
   }
   await env.DB.prepare('UPDATE users SET cm_id = ?, display_name = ? WHERE id = ?').bind(id, await seal(env, id, name), id).run();
+  if (pref) {
+    await env.DB.prepare('INSERT INTO user_prefs (user_id, pref) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET pref = excluded.pref').bind(id, pref).run();
+  }
   await audit(env, req, { id, cm_id: id }, 'cm_created', loginId);
   return json(env, req, { ok: true, id });
 }
@@ -1006,6 +1018,17 @@ async function ensureSchema(env) {
     env.DB.prepare('CREATE TABLE IF NOT EXISTS directory_meta (pref TEXT NOT NULL, code TEXT NOT NULL, service_type TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, source TEXT, imported_at INTEGER NOT NULL, PRIMARY KEY (pref, code))'),
     ...Object.entries(LEGACY_TYPES).map(([a, b]) => env.DB.prepare('UPDATE offices SET service_type = ? WHERE service_type = ?').bind(b, a)),
   ]);
+  // 設定の表に「基本の都道府県」の列を足す（1回だけ。済んだら app_meta に印を付けて、次からは何もしない）
+  const done = await env.DB.prepare("SELECT 1 AS x FROM app_meta WHERE k = 'prefs_pref_v1'").first();
+  if (!done) {
+    try {
+      await env.DB.prepare('ALTER TABLE user_prefs ADD COLUMN pref TEXT').run();
+    } catch (e) {
+      // すでに列があるとき（duplicate column）は問題なし。それ以外のエラーは知らせる
+      if (!/duplicate column/i.test(String(e && e.message || e))) throw e;
+    }
+    await env.DB.prepare("INSERT OR IGNORE INTO app_meta (k, v) VALUES ('prefs_pref_v1', '1')").run();
+  }
   migrated = true;
 }
 function dirParams(url) {
@@ -1187,8 +1210,15 @@ async function route(env, req) {
   if (m === 'POST' && p === '/api/password') return changePassword(env, req, user);
   if (m === 'POST' && p === '/api/me/prefs') {
     const b = await readJson(req);
-    if (!['normal', 'large', 'xlarge'].includes(b.font_size)) throw new HttpError(400, '文字の大きさが不正です');
-    await env.DB.prepare('INSERT INTO user_prefs (user_id, font_size) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET font_size = excluded.font_size').bind(user.id, b.font_size).run();
+    if (b.font_size === undefined && b.pref === undefined) throw new HttpError(400, '変更する内容がありません');
+    if (b.font_size !== undefined) {
+      if (!['normal', 'large', 'xlarge'].includes(b.font_size)) throw new HttpError(400, '文字の大きさが不正です');
+      await env.DB.prepare('INSERT INTO user_prefs (user_id, font_size) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET font_size = excluded.font_size').bind(user.id, b.font_size).run();
+    }
+    if (b.pref !== undefined) {
+      if (!PREFS.includes(b.pref)) throw new HttpError(400, '都道府県を選んでください');
+      await env.DB.prepare('INSERT INTO user_prefs (user_id, pref) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET pref = excluded.pref').bind(user.id, b.pref).run();
+    }
     return json(env, req, { ok: true });
   }
 

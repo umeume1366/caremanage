@@ -310,12 +310,12 @@
   };
   const activeLinks = (u) => db.links.filter((l) => l.user_id === u.id && linkFor(u, l.cm_id)).sort((a, z) => a.at - z.at);
   const pub = (u) => {
-    if (u.role === 'cm') return { id: u.id, role: u.role, login_id: u.login_id, name: u.name, must_change_pw: u.must, font_size: u.font_size || null, office: null };
+    if (u.role === 'cm') return { id: u.id, role: u.role, login_id: u.login_id, name: u.name, must_change_pw: u.must, font_size: u.font_size || null, pref: u.pref || null, office: null };
     const act = activeLinks(u);
     const l = act.find((x) => x.cm_id === u.cm_id) || act[0];
     const o = l ? office(l.office_id) : null;
     return {
-      id: u.id, role: u.role, login_id: u.login_id, name: u.name, must_change_pw: u.must, font_size: u.font_size || null,
+      id: u.id, role: u.role, login_id: u.login_id, name: u.name, must_change_pw: u.must, font_size: u.font_size || null, pref: u.pref || null,
       office: o ? { id: o.id, name: o.name, can_post: o.can_post, service_type: o.service_type } : null,
       links: act.length, pending: db.links.filter((x) => x.user_id === u.id && x.status === 'pending').length,
     };
@@ -339,8 +339,13 @@
     if (!u) return err(401, 'ログインしてください');
     if (path === '/api/me') return ok({ user: pub(u) });
     if (path === '/api/me/prefs') {
-      if (!['normal', 'large', 'xlarge'].includes(b.font_size)) return err(400, '文字の大きさが不正です');
-      u.font_size = b.font_size; return ok({ ok: true });
+      if (b.font_size === undefined && b.pref === undefined) return err(400, '変更する内容がありません');
+      if (b.font_size !== undefined) {
+        if (!['normal', 'large', 'xlarge'].includes(b.font_size)) return err(400, '文字の大きさが不正です');
+        u.font_size = b.font_size;
+      }
+      if (b.pref !== undefined) u.pref = b.pref;
+      return ok({ ok: true });
     }
     if (path === '/api/logout') { log(u, 'logout'); session = null; return ok({ ok: true }); }
     if (path === '/api/password') {
