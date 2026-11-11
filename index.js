@@ -4,10 +4,12 @@
 // - 保存データ: 氏名・メモ・本文を AES-256-GCM で暗号化。鍵はマスター鍵からケアマネ毎に HKDF で導出
 // - アクセス制御: すべての業務データを cm_id で分離。事業所アカウントは割り当てられた利用者のみ閲覧
 // - 監査ログ: ログイン、閲覧、投稿、設定変更を記録
-
+ 
+const VERSION = '2026-11-11b';
+let lastError = null; // 直近のサーバーエラー（/api/health で確認できる。個人情報は含めない）
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-
+ 
 const IDLE_TIMEOUT = 30 * 60 * 1000;
 const ABSOLUTE_TIMEOUT = 12 * 60 * 60 * 1000;
 const MAX_FAILED = 5;
@@ -23,7 +25,7 @@ function serviceType(v) {
   if (!SERVICE_TYPES.includes(v)) throw new HttpError(400, 'サービス種別が不正です');
   return v;
 }
-
+ 
 // ---------- 小物 ----------
 function toB64(buf) {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -60,7 +62,7 @@ class HttpError extends Error {
   }
 }
 const now = () => Date.now();
-
+ 
 // ---------- パスワード ----------
 async function hashPassword(password, salt = randomBytes(16), iter = PBKDF2_ITER) {
   iter = Math.min(Math.max(Number(iter) || PBKDF2_ITER, 10000), 100000);
@@ -76,21 +78,36 @@ async function verifyPassword(password, stored) {
 }
 // ダミー検証（存在しないIDでも処理時間をそろえる）
 const DUMMY_HASH = 'pbkdf2$100000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
-
+ 
 function checkPasswordPolicy(pw) {
   if (typeof pw !== 'string' || pw.length < 10) throw new HttpError(400, 'パスワードは10文字以上にしてください');
   if (pw.length > 128) throw new HttpError(400, 'パスワードが長すぎます');
   const kinds = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(pw)).length;
   if (kinds < 2) throw new HttpError(400, 'パスワードは英字・数字・記号のうち2種類以上を組み合わせてください');
 }
-
+ 
 // ---------- 暗号化（ケアマネ毎の鍵） ----------
+// DATA_KEY は「32バイトを Base64 にした文字」が基本。前後の空白や引用符が混ざっていても受け付け、
+// Base64 でない文字（自分で決めた合言葉など）の場合は SHA-256 で 32 バイトの鍵に変換して使う。
+function dataKeyText(env) {
+  return String(env.DATA_KEY || '').trim().replace(/^['"`]+|['"`]+$/g, '').trim();
+}
+async function masterKeyBytes(env) {
+  const raw = dataKeyText(env);
+  if (!raw) throw new HttpError(500, 'サーバー設定エラー（DATA_KEY 未設定）');
+  if (/^[A-Za-z0-9+/]+={0,2}$/.test(raw) && raw.length % 4 === 0) {
+    try {
+      const bytes = fromB64(raw);
+      if (bytes.length >= 16) return bytes;
+    } catch { /* Base64 でなければ下の方法で変換 */ }
+  }
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(raw)));
+}
 const keyCache = new Map();
 async function cmKey(env, cmId) {
   const cacheKey = String(cmId);
   if (keyCache.has(cacheKey)) return keyCache.get(cacheKey);
-  if (!env.DATA_KEY) throw new HttpError(500, 'サーバー設定エラー（DATA_KEY 未設定）');
-  const master = await crypto.subtle.importKey('raw', fromB64(env.DATA_KEY), 'HKDF', false, ['deriveKey']);
+  const master = await crypto.subtle.importKey('raw', await masterKeyBytes(env), 'HKDF', false, ['deriveKey']);
   const key = await crypto.subtle.deriveKey(
     { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('caremane-share-v1'), info: enc.encode(`cm:${cmId}`) },
     master,
@@ -119,7 +136,7 @@ async function open(env, cmId, sealed) {
     return '（復号できません）';
   }
 }
-
+ 
 // ---------- HTTP ----------
 function corsHeaders(env, req) {
   const origin = req.headers.get('Origin') || '';
@@ -174,13 +191,13 @@ function intId(v) {
   if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, 'IDが不正です');
   return n;
 }
-
+ 
 async function audit(env, req, user, action, target = null, cmId = null) {
   await env.DB.prepare('INSERT INTO audit_logs (cm_id, user_id, action, target, ip, ua, at) VALUES (?,?,?,?,?,?,?)')
     .bind(cmId ?? user?.cm_id ?? null, user?.id ?? null, action, target, clientIp(req), (req.headers.get('User-Agent') || '').slice(0, 200), now())
     .run();
 }
-
+ 
 // ---------- 認証 ----------
 async function authenticate(env, req) {
   const auth = req.headers.get('Authorization') || '';
@@ -195,6 +212,7 @@ async function authenticate(env, req) {
   }
   const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(s.user_id).first();
   if (!user || !user.active) throw new HttpError(401, 'アカウントが無効です');
+  await repairCm(env, user);
   if (t - s.last_seen > 5 * 60 * 1000) {
     await env.DB.prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?').bind(t, th).run();
   }
@@ -207,7 +225,7 @@ function requireCm(user) {
 function requirePwChanged(user) {
   if (user.must_change_pw) throw new HttpError(403, '初回ログインのため、パスワードを変更してください');
 }
-
+ 
 async function publicUser(env, u) {
   let office = null;
   if (u.role === 'provider' && u.office_id) {
@@ -223,25 +241,25 @@ async function publicUser(env, u) {
     office,
   };
 }
-
+ 
 async function handleLogin(env, req) {
   const body = await readJson(req);
   const loginId = str(body.login_id, 64, 'ログインID');
   const password = typeof body.password === 'string' ? body.password : '';
   const ip = clientIp(req);
   const t = now();
-
+ 
   await env.DB.prepare('DELETE FROM login_attempts WHERE at < ?').bind(t - IP_WINDOW).run();
   const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM login_attempts WHERE ip = ?').bind(ip).first();
   if (cnt.c >= IP_MAX_ATTEMPTS) throw new HttpError(429, 'ログイン試行が多すぎます。しばらくしてからお試しください');
-
+ 
   const user = await env.DB.prepare('SELECT * FROM users WHERE login_id = ?').bind(loginId).first();
   const fail = async (reason) => {
     await env.DB.prepare('INSERT INTO login_attempts (ip, at) VALUES (?, ?)').bind(ip, t).run();
     await audit(env, req, user, 'login_fail', `${loginId}: ${reason}`, user?.cm_id ?? null);
     throw new HttpError(401, 'ログインIDまたはパスワードが違います');
   };
-
+ 
   if (!user) {
     await verifyPassword(password, DUMMY_HASH);
     return fail('unknown id');
@@ -258,7 +276,8 @@ async function handleLogin(env, req) {
     return fail(!user.active ? 'inactive' : lock ? 'bad password (locked)' : 'bad password');
   }
   await env.DB.prepare('UPDATE users SET failed_count = 0, locked_until = 0 WHERE id = ?').bind(user.id).run();
-
+  await repairCm(env, user);
+ 
   const token = b64url(randomBytes(32));
   await env.DB.prepare('INSERT INTO sessions (token_hash, user_id, created_at, last_seen, ip) VALUES (?,?,?,?,?)')
     .bind(await sha256Hex(token), user.id, t, t, ip)
@@ -267,7 +286,15 @@ async function handleLogin(env, req) {
   await audit(env, req, user, 'login_success');
   return json(env, req, { token, user: await publicUser(env, user) });
 }
-
+ 
+// 登録が途中で止まったケアマネ（cm_id が空）を、使える状態に直す
+async function repairCm(env, user) {
+  if (user.role !== 'cm' || user.cm_id != null) return;
+  user.cm_id = user.id;
+  user.display_name = await seal(env, user.id, user.login_id);
+  await env.DB.prepare('UPDATE users SET cm_id = ?, display_name = ? WHERE id = ?').bind(user.id, user.display_name, user.id).run();
+}
+ 
 async function handleSetup(env, req) {
   const body = await readJson(req);
   if (!env.SETUP_TOKEN || typeof body.setup_token !== 'string' || !timingSafeEqual(body.setup_token, env.SETUP_TOKEN)) {
@@ -278,18 +305,27 @@ async function handleSetup(env, req) {
   if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは半角英数字4文字以上にしてください');
   checkPasswordPolicy(body.password);
   const name = str(body.name, 50, '氏名');
-  const exists = await env.DB.prepare('SELECT id FROM users WHERE login_id = ?').bind(loginId).first();
-  if (exists) throw new HttpError(409, 'このログインIDは使われています');
+  await masterKeyBytes(env); // 鍵に問題があれば、何も書き込む前に止める
+  const exists = await env.DB.prepare('SELECT id, role, cm_id FROM users WHERE login_id = ?').bind(loginId).first();
+  // 途中で止まった登録（ケアマネなのに cm_id が空）は、同じIDでやり直せる
+  const unfinished = exists && exists.role === 'cm' && exists.cm_id == null;
+  if (exists && !unfinished) throw new HttpError(409, 'このログインIDは使われています');
   const t = now();
-  const r = await env.DB.prepare("INSERT INTO users (role, login_id, display_name, password_hash, must_change_pw, created_at) VALUES ('cm', ?, '', ?, 0, ?)")
-    .bind(loginId, await hashPassword(body.password), t)
-    .run();
-  const id = r.meta.last_row_id;
+  let id;
+  if (unfinished) {
+    id = exists.id;
+    await env.DB.prepare('UPDATE users SET password_hash = ?, failed_count = 0, locked_until = 0 WHERE id = ?').bind(await hashPassword(body.password), id).run();
+  } else {
+    const r = await env.DB.prepare("INSERT INTO users (role, login_id, display_name, password_hash, must_change_pw, created_at) VALUES ('cm', ?, '', ?, 0, ?)")
+      .bind(loginId, await hashPassword(body.password), t)
+      .run();
+    id = r.meta.last_row_id;
+  }
   await env.DB.prepare('UPDATE users SET cm_id = ?, display_name = ? WHERE id = ?').bind(id, await seal(env, id, name), id).run();
   await audit(env, req, { id, cm_id: id }, 'cm_created', loginId);
   return json(env, req, { ok: true, id });
 }
-
+ 
 // ---------- アクセス判定 ----------
 async function loadClientForUser(env, user, clientId) {
   const c = await env.DB.prepare('SELECT * FROM clients WHERE id = ? AND cm_id = ?').bind(clientId, user.cm_id).first();
@@ -306,7 +342,7 @@ async function canPost(env, user) {
   const o = await env.DB.prepare('SELECT can_post FROM offices WHERE id = ? AND cm_id = ?').bind(user.office_id, user.cm_id).first();
   return !!o?.can_post;
 }
-
+ 
 // ---------- ルーム・メッセージ ----------
 // D1 の無料枠（1回の処理あたり50クエリ、1日500万行の読み取り）に収まるよう、
 // 一覧は利用者数に関係なく数回のクエリで取得する。
@@ -317,7 +353,7 @@ async function officeNameMap(env, user) {
   for (const o of rows.results) map.set(o.id, { id: o.id, name: await open(env, user.cm_id, o.name), service_type: o.service_type, active: !!o.active });
   return map;
 }
-
+ 
 async function listRooms(env, req, user, url) {
   const officeFilter = url.searchParams.get('office_id');
   const typeFilter = url.searchParams.get('service_type');
@@ -367,7 +403,7 @@ async function listRooms(env, req, user, url) {
   rooms.sort((a, b) => b.last_at - a.last_at);
   return json(env, req, { rooms });
 }
-
+ 
 async function listMessages(env, req, user, clientId, url) {
   const c = await loadClientForUser(env, user, clientId);
   const after = Number(url.searchParams.get('after') || 0);
@@ -378,7 +414,7 @@ async function listMessages(env, req, user, clientId, url) {
       ORDER BY m.id DESC LIMIT 200`
   ).bind(user.cm_id, clientId, after).all();
   const list = rows.results.reverse();
-
+ 
   // 既読位置を進める（新しいメッセージがあるときだけ書き込む）
   if (list.length) {
     await env.DB.prepare(
@@ -389,7 +425,7 @@ async function listMessages(env, req, user, clientId, url) {
   // ほかの人がどこまで読んだか（自分の投稿の「既読 n」に使う）
   const readRows = await env.DB.prepare('SELECT last_read_id FROM room_reads WHERE client_id = ? AND user_id != ?').bind(clientId, user.id).all();
   const reads = readRows.results.map((r) => r.last_read_id);
-
+ 
   const offices = list.some((m) => m.author_office) ? await officeNameMap(env, user) : new Map();
   const files = new Map();
   if (list.length) {
@@ -415,7 +451,7 @@ async function listMessages(env, req, user, clientId, url) {
   if (!after) await audit(env, req, user, 'room_view', `client:${c.id}`);
   return json(env, req, { messages: out, reads, can_post: await canPost(env, user) });
 }
-
+ 
 async function postMessage(env, req, user, clientId) {
   await loadClientForUser(env, user, clientId);
   if (!(await canPost(env, user))) throw new HttpError(403, 'この事業所は閲覧のみです');
@@ -436,7 +472,7 @@ async function postMessage(env, req, user, clientId) {
   await audit(env, req, user, 'message_post', `client:${clientId} msg:${id}`);
   return json(env, req, { ok: true, id });
 }
-
+ 
 // ---------- 添付ファイル（写真・PDF・CSV） ----------
 // 保存先は FILE_STORAGE で切り替え: 'd1'（既定）または 'r2'（R2 バケットを FILES として設定）
 // どちらでも「ケアマネごとの鍵」で暗号化してから保存し、直接リンクは発行しない。
@@ -464,7 +500,7 @@ async function openBytes(env, cmId, fileId, sealed) {
 function useR2(env) {
   return env.FILE_STORAGE === 'r2' && env.FILES;
 }
-
+ 
 async function uploadAttachment(env, req, user, clientId) {
   await loadClientForUser(env, user, clientId);
   if (!(await canPost(env, user))) throw new HttpError(403, 'この事業所は閲覧のみです');
@@ -481,7 +517,7 @@ async function uploadAttachment(env, req, user, clientId) {
   name = name.replace(/[\\/\x00-\x1f]/g, '_').trim().slice(0, 100) || 'ファイル';
   let caption = '';
   try { caption = decodeURIComponent(req.headers.get('X-Caption') || '').trim().slice(0, 500); } catch { /* なし */ }
-
+ 
   const t = now();
   const storage = useR2(env) ? 'r2' : 'd1';
   const msg = await env.DB.prepare('INSERT INTO messages (cm_id, client_id, author_id, body, created_at) VALUES (?,?,?,?,?)')
@@ -519,7 +555,7 @@ async function uploadAttachment(env, req, user, clientId) {
   await audit(env, req, user, 'file_upload', `client:${clientId} file:${fileId}`);
   return json(env, req, { ok: true, id: messageId, attachment_id: fileId });
 }
-
+ 
 async function getAttachment(env, req, user, fileId) {
   const a = await env.DB.prepare('SELECT * FROM attachments WHERE id = ? AND cm_id = ?').bind(fileId, user.cm_id).first();
   if (!a) throw new HttpError(404, '見つかりません');
@@ -551,7 +587,7 @@ async function getAttachment(env, req, user, fileId) {
     },
   });
 }
-
+ 
 // ---------- 管理（ケアマネのみ） ----------
 async function listOffices(env, req, user) {
   const rows = await env.DB.prepare('SELECT * FROM offices WHERE cm_id = ? ORDER BY id').bind(user.cm_id).all();
@@ -588,7 +624,7 @@ async function updateOffice(env, req, user, id) {
   await audit(env, req, user, 'office_update', `office:${id}`);
   return json(env, req, { ok: true });
 }
-
+ 
 async function listClients(env, req, user) {
   const rows = await env.DB.prepare('SELECT * FROM clients WHERE cm_id = ? ORDER BY archived, id').bind(user.cm_id).all();
   const clients = [];
@@ -645,7 +681,7 @@ async function updateClient(env, req, user, id) {
   await audit(env, req, user, 'client_update', `client:${id}`);
   return json(env, req, { ok: true });
 }
-
+ 
 async function listAccounts(env, req, user) {
   const rows = await env.DB.prepare("SELECT * FROM users WHERE cm_id = ? AND role = 'provider' ORDER BY id").bind(user.cm_id).all();
   const accounts = [];
@@ -697,7 +733,7 @@ async function updateAccount(env, req, user, id) {
   }
   return json(env, req, { ok: true });
 }
-
+ 
 async function listAudit(env, req, user, url) {
   const before = Number(url.searchParams.get('before') || 0) || Number.MAX_SAFE_INTEGER;
   const rows = await env.DB.prepare(
@@ -717,7 +753,7 @@ async function listAudit(env, req, user, url) {
   }
   return json(env, req, { logs });
 }
-
+ 
 async function changePassword(env, req, user) {
   const b = await readJson(req);
   if (typeof b.current !== 'string' || !(await verifyPassword(b.current, user.password_hash))) {
@@ -732,14 +768,15 @@ async function changePassword(env, req, user) {
   await audit(env, req, user, 'password_change');
   return json(env, req, { ok: true });
 }
-
+ 
 // ---------- 動作確認（/api/health） ----------
 // 設定がそろっているかを「はい／いいえ」だけで返します（鍵の中身は返しません）
 async function healthCheck(env) {
   const check = {
     database: '未接続（バインディング DB を確認）',
     tables: '未確認',
-    data_key: env.DATA_KEY ? 'OK' : '未設定',
+    data_key: dataKeyText(env) ? 'OK' : '未設定',
+    encryption: '未確認',
     setup_token: env.SETUP_TOKEN ? 'OK' : '未設定',
     allowed_origins: env.ALLOWED_ORIGINS || '未設定',
     file_storage: env.FILE_STORAGE === 'r2' ? (env.FILES ? 'r2' : 'r2（バケット FILES が未接続）') : 'd1',
@@ -753,23 +790,49 @@ async function healthCheck(env) {
       check.database = 'エラー';
     }
   }
-  const ok = check.database === 'OK' && check.tables === 'OK' && check.data_key === 'OK' && check.setup_token === 'OK';
-  return { ok, app: 'ケアつなぎ API', check };
+  if (check.data_key === 'OK') {
+    try {
+      keyCache.delete('0');
+      check.encryption = (await open(env, 0, await seal(env, 0, 'テスト'))) === 'テスト' ? 'OK' : 'エラー';
+    } catch (e) {
+      check.encryption = 'エラー：' + String(e && e.message || e).slice(0, 120);
+    }
+  }
+  if (check.tables === 'OK') {
+    try {
+      await env.DB.batch([
+        env.DB.prepare('SELECT id, role, cm_id, office_id, login_id, display_name, password_hash, must_change_pw, active, failed_count, locked_until, created_at FROM users LIMIT 1'),
+        env.DB.prepare('SELECT id, cm_id, name, service_type, can_post, active, created_at FROM offices LIMIT 1'),
+        env.DB.prepare('SELECT id, cm_id, name, note, archived, last_msg_id, last_msg_at, created_at FROM clients LIMIT 1'),
+        env.DB.prepare('SELECT id, cm_id, client_id, author_id, body, created_at FROM messages LIMIT 1'),
+        env.DB.prepare('SELECT user_id, client_id, last_read_id, read_at FROM room_reads LIMIT 1'),
+        env.DB.prepare('SELECT id, cm_id, user_id, action, target, ip, ua, at FROM audit_logs LIMIT 1'),
+        env.DB.prepare('SELECT id, cm_id, client_id, message_id, uploader_id, filename, mime, size, storage, created_at FROM attachments LIMIT 1'),
+      ]);
+      check.columns = 'OK';
+    } catch (e) {
+      check.columns = '表の形が古い：' + String(e && e.message || e).slice(0, 160);
+    }
+  }
+  const ok = check.database === 'OK' && check.tables === 'OK' && check.data_key === 'OK' && check.setup_token === 'OK' && check.encryption === 'OK' && check.columns === 'OK';
+  const out = { ok, version: VERSION, app: 'ケアつなぎ API', check };
+  if (lastError) out.last_error = lastError;
+  return out;
 }
-
+ 
 // ---------- ルーター ----------
 async function route(env, req) {
   const url = new URL(req.url);
   const p = url.pathname.replace(/\/+$/, '');
   const m = req.method;
-
+ 
   if (m === 'GET' && (p === '' || p === '/api/health')) return json(env, req, await healthCheck(env));
   if (m === 'GET' && p === '/api/service-types') return json(env, req, { service_types: SERVICE_TYPES });
   if (m === 'POST' && p === '/api/login') return handleLogin(env, req);
   if (m === 'POST' && p === '/api/setup') return handleSetup(env, req);
-
+ 
   const user = await authenticate(env, req);
-
+ 
   if (m === 'GET' && p === '/api/me') return json(env, req, { user: await publicUser(env, user) });
   if (m === 'POST' && p === '/api/logout') {
     await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(user.token_hash).run();
@@ -777,9 +840,9 @@ async function route(env, req) {
     return json(env, req, { ok: true });
   }
   if (m === 'POST' && p === '/api/password') return changePassword(env, req, user);
-
+ 
   requirePwChanged(user);
-
+ 
   if (m === 'GET' && p === '/api/rooms') return listRooms(env, req, user, url);
   let mm;
   if ((mm = p.match(/^\/api\/rooms\/(\d+)\/messages$/))) {
@@ -788,7 +851,7 @@ async function route(env, req) {
   }
   if ((mm = p.match(/^\/api\/rooms\/(\d+)\/attachments$/)) && m === 'POST') return uploadAttachment(env, req, user, intId(mm[1]));
   if ((mm = p.match(/^\/api\/attachments\/(\d+)$/)) && m === 'GET') return getAttachment(env, req, user, intId(mm[1]));
-
+ 
   requireCm(user);
   if (p === '/api/offices') {
     if (m === 'GET') return listOffices(env, req, user);
@@ -806,10 +869,10 @@ async function route(env, req) {
   }
   if ((mm = p.match(/^\/api\/accounts\/(\d+)$/)) && m === 'PATCH') return updateAccount(env, req, user, intId(mm[1]));
   if (m === 'GET' && p === '/api/audit') return listAudit(env, req, user, url);
-
+ 
   throw new HttpError(404, '見つかりません');
 }
-
+ 
 // ---------- 計測（開発時のみ：DEBUG_METRICS=1 で D1 の読み書き行数をヘッダーに出す） ----------
 function meteredDb(db, acc) {
   const add = (r) => { acc.q++; acc.r += r?.meta?.rows_read || 0; acc.w += r?.meta?.rows_written || 0; return r; };
@@ -825,7 +888,7 @@ function meteredDb(db, acc) {
     batch: async (stmts) => { const rs = await db.batch(stmts.map((x) => x._raw || x)); rs.forEach(add); return rs; },
   };
 }
-
+ 
 export default {
   async fetch(req, env) {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(env, req) });
@@ -841,6 +904,7 @@ export default {
       if (e instanceof HttpError) res = json(env, req, { error: e.message }, e.status);
       else {
         console.error(e);
+        lastError = { at: new Date().toISOString(), path: new URL(req.url).pathname, message: String(e && e.message || e).slice(0, 200) };
         res = json(env, req, { error: 'サーバーでエラーが発生しました' }, 500);
       }
     }
@@ -848,3 +912,4 @@ export default {
     return res;
   },
 };
+ 
