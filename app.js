@@ -1,6 +1,9 @@
-// ケアつなぎ フロントエンド（ビルド不要・外部ライブラリなし）
+// ケアブル フロントエンド（ビルド不要・外部ライブラリなし）
 (() => {
   'use strict';
+
+  // ほかのサイトの中に埋め込まれているときは動かさない（config.js で判定）
+  if (window.APP_CONFIG && window.APP_CONFIG.BLOCKED) return;
 
   const API = (window.APP_CONFIG && window.APP_CONFIG.API_BASE || '').replace(/\/+$/, '');
   const app = document.getElementById('app');
@@ -57,7 +60,7 @@
       ? ['画面の下（または上）にある「共有」ボタン（□に↑のマーク）を押します。', '下へ動かして「ホーム画面に追加」を押します。', '右上の「追加」を押します。']
       : ['画面の右上（または下）の「︙」メニューを押します。', '「ホーム画面に追加」または「アプリをインストール」を押します。', '「追加」「インストール」を押します。'];
     dialog('ホーム画面に追加', h('div', null,
-      h('p', null, 'ホーム画面にケアつなぎのアイコンが置かれ、アプリのようにすぐ開けるようになります。'),
+      h('p', null, 'ホーム画面にケアブルのアイコンが置かれ、アプリのようにすぐ開けるようになります。'),
       h('ol', { class: 'warnlist' }, steps.map((t) => h('li', null, t))),
       isIOS() ? h('p', { class: 'hint' }, 'iPhone・iPad では Safari で開いてください。') : null),
     (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
@@ -138,7 +141,10 @@
   function logoutLocal(msg) {
     clearTimers();
     S.token = null; S.user = null; S.q = ''; S.svc = 'all'; S.clientDraft = null;
-    blobCache.clear();
+    blobCache.clear(); dropUrls();
+    // 開いたままの写真・PDF・ダイアログを画面から消す（ログアウト後に利用者の情報が残らないように）
+    document.querySelectorAll('.overlay').forEach((o) => o.remove());
+    app.style.height = '';
     safeSet(sessionStorage, 'token', null);
     if (MEM) memHash = '#/';
     else if (location.hash) history.replaceState(null, '', location.pathname);
@@ -147,12 +153,15 @@
 
   // 無操作で自動ログアウト（共有端末での覗き見対策）
   ['pointerdown', 'keydown', 'touchstart'].forEach((ev) => addEventListener(ev, () => { S.lastActive = Date.now(); }, { passive: true }));
-  setInterval(() => {
+  function idleCheck() {
     if (S.token && Date.now() - S.lastActive > IDLE_LOGOUT_MS) {
       api('POST', '/api/logout').catch(() => {});
       logoutLocal('30分間操作がなかったため、自動でログアウトしました');
     }
-  }, 30 * 1000);
+  }
+  setInterval(idleCheck, 30 * 1000);
+  // スリープや別アプリから戻ってきたときは、すぐに確認する（タイマーが止まっていても見逃さない）
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) idleCheck(); });
 
   // ---------- 画面共通 ----------
   function topbar(title, { back, sub, right, dog } = {}) {
@@ -168,9 +177,12 @@
 
   function dialog(title, body, actions) {
     const ov = h('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': title });
-    const close = () => ov.remove();
+    const opener = document.activeElement;
+    const esc = (e) => { if (e.key === 'Escape' && ov === [...document.querySelectorAll('.overlay')].pop()) close(); };
+    const close = () => { ov.remove(); document.removeEventListener('keydown', esc); if (opener && opener.isConnected) opener.focus(); };
     ov.append(h('div', { class: 'dialog' }, h('h2', null, title), body, h('div', { class: 'actions' }, actions(close))));
     ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    document.addEventListener('keydown', esc);
     document.body.append(ov);
     const first = ov.querySelector('input, textarea, select');
     if (first) first.focus();
@@ -215,6 +227,7 @@
   async function route() {
     clearTimers();
     document.querySelectorAll('.overlay').forEach((o) => o.remove());
+    dropUrls();
     if (!S.token) return renderLogin();
     if (!S.user) {
       try { S.user = (await api('GET', '/api/me')).user; useUserSize(S.user); } catch { return; }
@@ -257,14 +270,14 @@
       err, btn,
     );
     mount(h('div', { class: 'login-top' }, sizeButton(true)), h('main', { class: 'login' },
-      h('div', { class: 'logo' }, 'ケアつなぎ'),
+      h('div', { class: 'logo' }, 'ケアブル'),
       h('p', { class: 'tagline' }, 'ケアマネジャーと事業所をつなぐ連絡帳'),
       API === 'demo' ? h('div', { class: 'demo-note' }, h('b', null, 'デモモードで動いています'), h('br'),
         'ケアマネ：cm-demo / cm2-demo　事業所：office-demo / nurse-demo / day-demo', h('br'), 'パスワード（共通）：Demo-pass-123', h('br'),
         h('span', { class: 'hint' }, '見本データです。再読み込みすると元に戻ります。')) : null,
       form,
       isApp() ? null : h('p', { class: 'installrow' }, h('button', { type: 'button', class: 'btn secondary block', onclick: installApp }, '📲 ホーム画面に追加（アプリにする）')),
-      h('div', { class: 'secure-note' }, '🔒 安心してお使いいただくために',
+      h('div', { class: 'secure-note' }, '🔒 安心してお使いいただけます',
         h('ul', null,
           h('li', null, '通信と保存データはすべて暗号化しています'),
           h('li', null, '5回続けて間違えると15分間ロックされます'),
@@ -391,7 +404,7 @@
   async function renderHome(tab, officeId) {
     const isCm = S.user.role === 'cm';
     if (!S.svc) S.svc = 'all';
-    const title = isCm ? 'ケアつなぎ' : (S.user.office ? S.user.office.name : 'ケアつなぎ');
+    const title = isCm ? 'ケアブル' : (S.user.office ? S.user.office.name : 'ケアブル');
     const listBox = h('div', null, h('p', { class: 'empty loading' }, '読み込み中…'));
     const tabs = isCm ? h('nav', { class: 'tabs', role: 'tablist' },
       h('button', { role: 'tab', 'aria-selected': String(tab === 'clients'), onclick: () => go('#/') }, '👤 利用者ごと'),
@@ -517,6 +530,10 @@
   // ---------- 添付ファイル ----------
   const MAX_FILE = 5 * 1024 * 1024;
   const blobCache = new Map();
+  // 写真・PDFを表示するための一時的なアドレス。画面を切り替えたとき・ログアウトしたときに必ず破棄する
+  const liveUrls = new Set();
+  function objUrl(blob) { const u = URL.createObjectURL(blob); liveUrls.add(u); return u; }
+  function dropUrls() { liveUrls.forEach((u) => URL.revokeObjectURL(u)); liveUrls.clear(); }
   async function apiRaw(method, path, { body, headers } = {}) {
     let res;
     try {
@@ -578,10 +595,10 @@
       const blob = await fileBlob(f);
       const kind = fileKind(f);
       if (kind === 'image') {
-        const url = URL.createObjectURL(blob);
+        const url = objUrl(blob);
         viewer(f.name, h('img', { src: url, alt: f.name, class: 'viewer-img' }));
       } else if (kind === 'pdf') {
-        const url = URL.createObjectURL(blob);
+        const url = objUrl(blob);
         viewer(f.name, h('iframe', { src: url, title: f.name, class: 'viewer-pdf' }),
           h('a', { class: 'btn secondary', href: url, target: '_blank', rel: 'noopener' }, '別の画面で開く'));
       } else {
@@ -600,7 +617,7 @@
       const img = h('img', { alt: f.name, class: 'thumb' });
       img.addEventListener('load', () => { const sc = img.closest('.chat-scroll'); if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < img.height + 200) sc.scrollTop = sc.scrollHeight; });
       const btn = h('button', { type: 'button', class: 'filethumb', 'aria-label': `写真「${f.name}」を大きく見る`, onclick: () => openFile(f) }, img, h('span', { class: 'loading' }, '写真を読み込み中…'));
-      fileBlob(f).then((b) => { img.src = URL.createObjectURL(b); btn.querySelector('.loading')?.remove(); })
+      fileBlob(f).then((b) => { img.src = objUrl(b); btn.querySelector('.loading')?.remove(); })
         .catch(() => { btn.querySelector('.loading').textContent = '写真を表示できませんでした'; });
       return btn;
     }
@@ -637,7 +654,7 @@
       const caption = h('textarea', { rows: '2', maxlength: '500', placeholder: 'ひとこと（なくても送れます）', id: 'upload-caption' });
       const err = h('p', { class: 'error' });
       const preview = pf.kind === 'image'
-        ? h('img', { src: URL.createObjectURL(pf.blob), alt: '', class: 'upload-preview' })
+        ? h('img', { src: objUrl(pf.blob), alt: '', class: 'upload-preview' })
         : h('div', { class: 'filecard static' }, h('span', { class: 'ficon ' + pf.kind }, pf.kind === 'pdf' ? 'PDF' : 'CSV'),
           h('span', { class: 'fmain' }, h('span', { class: 'fname' }, pf.name), h('span', { class: 'fmeta' }, fmtSize(pf.blob.size))));
       dialog('このファイルを送りますか？', h('div', null, preview,
@@ -850,7 +867,7 @@
 
   // ---------- 事業所の名簿（厚生労働省の公開データ）を取り込む ----------
   // CSV の1行を項目に分ける（"..." で囲まれた項目の中のカンマ・改行にも対応）
-  function parseCsv(text, onRow) {
+  function parseCsvRows(text, onRow) {
     let row = [], cell = '', inQ = false;
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
@@ -881,7 +898,7 @@
       if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
       progress(`${pref}の事業所をえらび出しています${step}…`);
       let col = null; const rows = [];
-      parseCsv(text, (r) => {
+      parseCsvRows(text, (r) => {
         if (!col) {
           const at = (...names) => r.findIndex((x) => names.some((n) => x.trim().startsWith(n)));
           col = { pref: at('都道府県名'), city: at('市区町村名'), name: at('事業所名'), addr: at('住所'), bld: at('方書'), tel: at('電話番号'), no: at('事業所番号') };
@@ -1100,8 +1117,9 @@
 
   function genPassword() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-    const r = crypto.getRandomValues(new Uint32Array(12));
-    return Array.from(r, (x) => chars[x % chars.length]).join('') + '-' + (r[0] % 90 + 10);
+    // かたよりが出ない範囲の乱数だけを使う
+    const pick = (n) => { const b = new Uint32Array(1); let x; do { crypto.getRandomValues(b); x = b[0]; } while (x >= Math.floor(0x100000000 / n) * n); return x % n; };
+    return Array.from({ length: 12 }, () => chars[pick(chars.length)]).join('') + '-' + (pick(90) + 10);
   }
   function showPassword(loginId, pw) {
     dialog('初期パスワード', h('div', null,
@@ -1121,7 +1139,7 @@
       const loginId = h('input', { type: 'text', autocapitalize: 'off', maxlength: '64' });
       const err = h('p', { class: 'error' });
       dialog('新しいIDを発行', h('div', null,
-        h('p', { class: 'hint' }, 'まだケアつなぎのIDを持っていない事業所に、IDを発行します。'),
+        h('p', { class: 'hint' }, 'まだケアブルのIDを持っていない事業所に、IDを発行します。'),
         h('label', { class: 'field' }, '事業所', office),
         h('label', { class: 'field' }, '担当者名', name),
         h('label', { class: 'field' }, 'ログインID', h('span', { class: 'hint' }, '（半角の英字・数字で4文字以上。数字だけでも大丈夫です。例：1234）'), loginId),
@@ -1216,5 +1234,14 @@
     );
   }
 
-  route();
+  // デモの見本データは、デモのときだけ読み込む（本番では読み込まないので、そのぶん速く開く）
+  if (API === 'demo' && typeof window.demoLogin !== 'function') {
+    const me = document.querySelector('script[src*="app.js"]');
+    const v = me ? (me.getAttribute('src').split('?')[1] || '') : '';
+    const sc = document.createElement('script');
+    sc.src = 'demo-api.js' + (v ? '?' + v : '');
+    sc.onload = route;
+    sc.onerror = () => renderLogin('デモの準備ができませんでした。もう一度開いてください');
+    document.head.append(sc);
+  } else route();
 })();

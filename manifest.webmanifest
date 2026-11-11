@@ -1,15 +1,15 @@
 {
   "id": "./",
-  "name": "ケアつなぎ",
-  "short_name": "ケアつなぎ",
+  "name": "ケアブル",
+  "short_name": "ケアブル",
   "description": "ケアマネジャーとサービス事業所をつなぐ連絡帳",
   "lang": "ja",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#ffffff",
-  "theme_color": "#ffd400",
+  "background_color": "#fbf6ec",
+  "theme_color": "#ffd75e",
   "icons": [
     {
       "src": "icon-192.png",
@@ -22,6 +22,12 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }
