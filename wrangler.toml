@@ -9,7 +9,7 @@ enabled = true
 
 [vars]
 # ① GitHub Pages のアドレス（https:// から、最後の / なし）。違っていたら書き換え
-ALLOWED_ORIGINS = "https://umebiz1366.github.io"
+ALLOWED_ORIGINS = "https://umeume1366.github.io"
 # 添付ファイルの保存先。最初は "d1"。利用者が増えたら "r2"（手順書の「R2への切り替え」参照）
 FILE_STORAGE = "d1"
 
