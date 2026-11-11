@@ -1,17 +1,21 @@
-/* ケアつなぎ：大きな文字・高コントラスト・LINE風 */
+/* ケアつなぎ：大きな文字・高コントラスト・LINE風（黄色基調） */
 :root {
-  --green: #06a34a;        /* 白文字でも読める濃さの緑（コントラスト比 4.5:1 以上） */
-  --green-dark: #04803a;
-  --mine: #b9f2a1;          /* 自分の吹き出し */
+  --brand: #ffd400;         /* 基調の黄色（ヘッダー・主なボタンの背景） */
+  --brand-hover: #f2c300;
+  --on-brand: #241c00;      /* 黄色の上にのせる文字（濃いこげ茶。コントラスト比 10:1 以上） */
+  --brand-ink: #6b4f00;     /* 白の上で使う文字色（コントラスト比 7:1 以上） */
+  --brand-edge: #c29200;    /* 白の上でも見える枠線 */
+  --brand-soft: #fff6cf;    /* うすい黄色（選択・ホバー・お知らせ） */
+  --mine: #ffe57a;          /* 自分の吹き出し */
   --theirs: #ffffff;
-  --chat-bg: #c9d6e3;       /* トーク背景 */
+  --chat-bg: #efe5c8;       /* トーク背景 */
   --text: #111111;
   --sub: #4a4a4a;
-  --line: #d0d0d0;
-  --bg: #f4f5f7;
+  --line: #d9d2bd;
+  --bg: #faf6ea;
   --danger: #c62828;
   --badge: #e53935;
-  --focus: #ffbf00;
+  --focus: #1d5fbf;
   font-size: 20px;
 }
 html[data-size="large"] { font-size: 24px; }
@@ -34,17 +38,19 @@ button, input, textarea, select { font: inherit; color: inherit; }
 /* ---------- ボタン・フォーム ---------- */
 .btn {
   min-height: 2.6rem; padding: .4rem 1.1rem; border-radius: .6rem;
-  border: 2px solid var(--green); background: var(--green); color: #fff;
+  border: 2px solid var(--brand-edge); background: var(--brand); color: var(--on-brand);
   font-weight: 700; cursor: pointer;
 }
-.btn:hover { background: var(--green-dark); }
-.btn.secondary { background: #fff; color: var(--green-dark); }
+.btn:hover { background: var(--brand-hover); }
+.btn.secondary { background: #fff; color: var(--brand-ink); }
+.btn.secondary:hover { background: var(--brand-soft); }
+.btn.danger:hover { background: #fdeeee; }
 .btn.danger { background: #fff; color: var(--danger); border-color: var(--danger); }
 .btn.block { width: 100%; }
 .btn:disabled { opacity: .5; cursor: default; }
 .iconbtn {
   min-width: 2.6rem; min-height: 2.6rem; border: none; background: transparent;
-  color: #fff; font-weight: 700; cursor: pointer; border-radius: .5rem; padding: 0 .5rem;
+  color: var(--on-brand); font-weight: 700; cursor: pointer; border-radius: .5rem; padding: 0 .5rem;
 }
 label.field { display: block; margin: 0 0 1rem; font-weight: 700; }
 label.field input, label.field textarea, label.field select {
@@ -60,7 +66,8 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 .topbar {
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; gap: .4rem;
-  background: var(--green); color: #fff; padding: .4rem .6rem;
+  background: var(--brand); color: var(--on-brand); padding: .4rem .6rem;
+  border-bottom: 2px solid var(--brand-edge);
   padding-top: calc(.4rem + env(safe-area-inset-top));
 }
 .topbar h1 { flex: 1; margin: 0; font-size: 1.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -68,9 +75,9 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 
 /* ---------- ログイン ---------- */
 .login { padding: 2rem 1.2rem; max-width: 520px; margin: 0 auto; width: 100%; }
-.login .logo { text-align: center; color: var(--green-dark); font-size: 1.8rem; font-weight: 800; margin: 1rem 0 .2rem; }
+.login .logo { text-align: center; color: var(--brand-ink); font-size: 1.8rem; font-weight: 800; margin: 1rem 0 .2rem; }
 .login .tagline { text-align: center; color: var(--sub); margin: 0 0 1.5rem; }
-.secure-note { margin-top: 1.5rem; padding: .8rem 1rem; background: #eef8f1; border-radius: .6rem; font-size: .85rem; }
+.secure-note { margin-top: 1.5rem; padding: .8rem 1rem; background: var(--brand-soft); border-radius: .6rem; font-size: .85rem; }
 .secure-note ul { margin: .3rem 0 0; padding-left: 1.2rem; }
 
 /* ---------- タブ ---------- */
@@ -79,7 +86,7 @@ label.check input { width: 1.4rem; height: 1.4rem; }
   flex: 1; min-height: 2.8rem; background: #fff; border: none; border-bottom: 4px solid transparent;
   font-weight: 700; color: var(--sub); cursor: pointer;
 }
-.tabs button[aria-selected="true"] { color: var(--green-dark); border-bottom-color: var(--green); }
+.tabs button[aria-selected="true"] { color: var(--on-brand); border-bottom-color: var(--brand); background: var(--brand-soft); }
 
 /* ---------- トーク一覧 ---------- */
 .list { list-style: none; margin: 0; padding: 0; }
@@ -87,12 +94,12 @@ label.check input { width: 1.4rem; height: 1.4rem; }
   display: flex; width: 100%; gap: .8rem; align-items: center; text-align: left;
   padding: .8rem 1rem; background: #fff; border: none; border-bottom: 1px solid var(--line); cursor: pointer;
 }
-.list li button:hover { background: #f3faf5; }
+.list li button:hover { background: var(--brand-soft); }
 .avatar {
   flex: none; width: 2.6rem; height: 2.6rem; border-radius: 50%;
-  background: #7bc79a; color: #fff; display: grid; place-items: center; font-weight: 800;
+  background: var(--brand); color: var(--on-brand); display: grid; place-items: center; font-weight: 800;
 }
-.avatar.office { background: #6f8fbf; border-radius: .6rem; }
+.avatar.office { background: #6f8fbf; color: #fff; border-radius: .6rem; }
 .list .main { flex: 1; min-width: 0; }
 .list .name { font-weight: 800; font-size: 1.05rem; }
 .list .preview, .list .meta { color: var(--sub); font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -103,7 +110,7 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 }
 .empty { padding: 2rem 1rem; text-align: center; color: var(--sub); }
 .filter-chip {
-  margin: .6rem 1rem 0; padding: .5rem .8rem; background: #e7eefa; border-radius: .6rem;
+  margin: .6rem 1rem 0; padding: .5rem .8rem; background: var(--brand-soft); border-radius: .6rem;
   display: flex; align-items: center; justify-content: space-between; gap: .5rem;
 }
 
@@ -134,7 +141,7 @@ label.check input { width: 1.4rem; height: 1.4rem; }
   flex: 1; min-height: 2.6rem; max-height: 8rem; resize: none; padding: .5rem .7rem;
   border: 2px solid #888; border-radius: 1.3rem;
 }
-.readonly-bar { padding: .8rem 1rem; background: #fff6d6; border-top: 1px solid var(--line); text-align: center; font-weight: 700; }
+.readonly-bar { padding: .8rem 1rem; background: #eceff2; border-top: 1px solid var(--line); text-align: center; font-weight: 700; }
 
 /* ---------- 管理画面 ---------- */
 .page { padding: 1rem; }
@@ -148,12 +155,12 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 .log { font-size: .85rem; border-bottom: 1px solid var(--line); padding: .4rem 0; }
 .menu { list-style: none; padding: 0; margin: 0; }
 .menu button { width: 100%; text-align: left; padding: 1rem; border: none; border-bottom: 1px solid var(--line); background: #fff; font-weight: 700; cursor: pointer; min-height: 3rem; }
-.menu button:hover { background: #f3faf5; }
+.menu button:hover { background: var(--brand-soft); }
 
 /* 文字サイズ切替 */
 .sizes { display: flex; gap: .5rem; }
 .sizes button { flex: 1; }
-.sizes button[aria-pressed="true"] { background: var(--green); color: #fff; }
+.sizes button[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); }
 
 /* ダイアログ */
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; z-index: 20; padding: 1rem; }
@@ -196,7 +203,7 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 .chip.t-day[aria-pressed="true"] { background: var(--t-day); }
 .chip.t-home[aria-pressed="true"] { background: var(--t-home); }
 .chip.t-nurse[aria-pressed="true"] { background: var(--t-nurse); }
-.chip[aria-pressed="true"]:not(.t-day):not(.t-home):not(.t-nurse):not(.t-other) { background: var(--green); border-color: var(--green); }
+.chip[aria-pressed="true"]:not(.t-day):not(.t-home):not(.t-nurse):not(.t-other) { background: var(--brand); border-color: var(--brand-edge); color: var(--on-brand); }
 .stype {
   display: inline-block; padding: 0 .5rem; margin: .1rem .3rem .1rem 0; border-radius: .4rem;
   font-size: .78rem; font-weight: 800; background: var(--t-other-bg); color: var(--t-other); white-space: nowrap;
@@ -219,13 +226,12 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 .sizewrap { position: relative; }
 .sizebtn {
   display: inline-flex; align-items: center; gap: .25rem; min-height: 2.4rem; padding: 0 .6rem;
-  border: 2px solid rgba(255,255,255,.85); border-radius: .6rem; background: transparent; color: #fff;
+  border: 2px solid var(--on-brand); border-radius: .6rem; background: #fff; color: var(--on-brand);
   font-weight: 800; font-size: .8rem; cursor: pointer; white-space: nowrap;
 }
 .sizebtn .aa { font-size: 1.05rem; line-height: 1; }
-.sizebtn .cur { background: #fff; color: var(--green-dark); border-radius: .35rem; padding: 0 .35rem; }
-.sizebtn.light { border-color: var(--green); color: var(--green-dark); background: #fff; }
-.sizebtn.light .cur { background: var(--green); color: #fff; }
+.sizebtn .cur { background: var(--brand); color: var(--on-brand); border-radius: .35rem; padding: 0 .35rem; }
+.sizebtn.light { border-color: var(--brand-edge); color: var(--brand-ink); background: #fff; }
 .sizepanel {
   position: absolute; right: 0; top: calc(100% + .4rem); z-index: 15; width: 12rem;
   background: #fff; color: var(--text); border: 2px solid var(--line); border-radius: .8rem;
@@ -233,20 +239,20 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 }
 .sizepanel .ttl { font-size: .8rem; font-weight: 800; color: var(--sub); }
 .sizepanel .opt {
-  min-height: 2.6rem; border: 2px solid var(--green); border-radius: .6rem; background: #fff;
-  color: var(--green-dark); font-weight: 800; cursor: pointer; text-align: left; padding: 0 .8rem;
+  min-height: 2.6rem; border: 2px solid var(--brand-edge); border-radius: .6rem; background: #fff;
+  color: var(--brand-ink); font-weight: 800; cursor: pointer; text-align: left; padding: 0 .8rem;
 }
 .sizepanel .opt.s0 { font-size: 16px; }
 .sizepanel .opt.s1 { font-size: 20px; }
 .sizepanel .opt.s2 { font-size: 24px; }
-.sizepanel .opt[aria-pressed="true"] { background: var(--green); color: #fff; }
+.sizepanel .opt[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); }
 .sizepanel .opt[aria-pressed="true"]::after { content: " ✓"; }
 .login-top { display: flex; justify-content: flex-end; padding: .7rem 1rem 0; }
 .topbar .iconbtn { white-space: nowrap; }
 
 /* ---------- 添付ファイル ---------- */
 .attachbtn {
-  flex: none; width: 2.8rem; height: 2.8rem; border-radius: 50%; border: 2px solid var(--green);
+  flex: none; width: 2.8rem; height: 2.8rem; border-radius: 50%; border: 2px solid var(--brand-edge);
   background: #fff; font-size: 1.3rem; cursor: pointer; line-height: 1;
 }
 .bubble.has-file { padding: .4rem; }
@@ -259,7 +265,7 @@ label.check input { width: 1.4rem; height: 1.4rem; }
   padding: .5rem .6rem; border: 2px solid var(--line); border-radius: .7rem; background: #fff; cursor: pointer;
 }
 .filecard.static { cursor: default; margin-bottom: .5rem; }
-.filecard:hover:not(.static) { border-color: var(--green); }
+.filecard:hover:not(.static) { border-color: var(--brand-edge); }
 .ficon { flex: none; width: 2.6rem; height: 2.6rem; border-radius: .5rem; display: grid; place-items: center; color: #fff; font-weight: 900; font-size: .7rem; }
 .ficon.pdf { background: #c62828; }
 .ficon.csv { background: #1b7f3b; }
@@ -277,10 +283,65 @@ label.check input { width: 1.4rem; height: 1.4rem; }
 .csv-wrap { overflow: auto; width: 100%; background: #fff; }
 table.csv { border-collapse: collapse; font-size: .85rem; font-variant-numeric: tabular-nums; }
 table.csv th, table.csv td { border: 1px solid var(--line); padding: .35rem .6rem; white-space: nowrap; text-align: left; }
-table.csv thead th { position: sticky; top: 0; background: #e8f5ec; }
+table.csv thead th { position: sticky; top: 0; background: var(--brand-soft); }
 table.csv tbody tr:nth-child(even) { background: #fafafa; }
 
-.demo-note { margin: 0 0 1.2rem; padding: .7rem .9rem; background: #fff8dc; border: 2px solid #e6c65c; border-radius: .6rem; font-size: .85rem; line-height: 1.7; }
+.demo-note { margin: 0 0 1.2rem; padding: .7rem .9rem; background: #fff; border: 2px dashed var(--brand-edge); border-radius: .6rem; font-size: .85rem; line-height: 1.7; }
 
 .setup-link { text-align: center; margin-top: 1.2rem; }
-.linkbtn { background: none; border: none; color: var(--green-dark); text-decoration: underline; font-weight: 700; cursor: pointer; min-height: 2.4rem; }
+.linkbtn { background: none; border: none; color: var(--brand-ink); text-decoration: underline; font-weight: 700; cursor: pointer; min-height: 2.4rem; }
+
+/* ---------- スマホ（幅が狭い画面）向けの調整 ---------- */
+.topbar h1 { min-width: 0; }
+.rowline .btn { flex: 0 1 auto; }
+img, video { max-width: 100%; }
+@media (max-width: 600px) {
+  /* 文字は大きめのまま、画面に収まる大きさに */
+  :root { font-size: 17px; }
+  html[data-size="large"] { font-size: 20px; }
+  html[data-size="xlarge"] { font-size: 23px; }
+
+  /* ヘッダー：タイトルを2行まで見せ、ボタンは小さくまとめる */
+  .topbar { gap: .25rem; padding-left: .4rem; padding-right: .4rem; }
+  .topbar h1 { font-size: 1rem; line-height: 1.25; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .topbar .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .iconbtn { padding: 0 .3rem; font-size: .85rem; min-width: 0; }
+  .sizebtn { font-size: 0; gap: .2rem; padding: 0 .4rem; min-height: 2.3rem; }
+  .sizebtn .aa { font-size: 1rem; }
+  .sizebtn .cur { font-size: .8rem; }
+  .sizepanel { width: min(12rem, 80vw); }
+
+  .login { padding: 1rem 1rem 2rem; }
+  .login .logo { font-size: 1.6rem; margin-top: .5rem; }
+  .login-top { padding: .6rem .8rem 0; }
+
+  .tabs button { font-size: .95rem; padding: 0 .2rem; }
+  .typebar { padding: .5rem .7rem; gap: .4rem; }
+  .chip { padding: .2rem .8rem; }
+  .searchbar { padding: .5rem .7rem; }
+  .list li button { padding: .7rem .7rem; gap: .6rem; }
+  .avatar { width: 2.4rem; height: 2.4rem; }
+
+  .chat-scroll { padding: .8rem .5rem; }
+  .bubble { max-width: 84%; padding: .55rem .8rem; }
+  .composer { gap: .35rem; padding: .5rem; }
+  .composer .btn { padding: .4rem .8rem; }
+  .attachbtn { width: 2.6rem; height: 2.6rem; }
+
+  /* 管理画面：ボタンは横いっぱいに並べて押しやすく */
+  .page { padding: .7rem; }
+  .card { padding: .8rem; }
+  .rowline .btn { flex: 1 1 auto; }
+  .overlay { padding: .6rem; align-items: end; }
+  .dialog { padding: 1rem; max-height: 92vh; border-radius: 1rem 1rem .6rem .6rem; }
+  .dialog .actions { flex-wrap: nowrap; }
+  .dialog .actions .btn { flex: 1; padding-left: .4rem; padding-right: .4rem; }
+  .viewer { padding: 0; }
+  .viewer-box { height: 100vh; height: 100dvh; border-radius: 0; }
+  #toast { bottom: 5rem; width: max-content; }
+}
+@media (max-width: 360px) {
+  :root { font-size: 16px; }
+  html[data-size="large"] { font-size: 18px; }
+  html[data-size="xlarge"] { font-size: 21px; }
+}
