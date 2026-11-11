@@ -221,7 +221,7 @@
     const btn = h('button', { class: 'btn block', type: 'submit' }, '登録する');
     mount(h('div', { class: 'login-top' }, sizeButton(true)), h('main', { class: 'login' },
       h('h2', null, 'ケアマネジャーの登録'),
-      h('p', { class: 'testnote' }, 'テスト仕様です。現状は、セットアップキーに test2 を入れて下さい。'),
+      h('p', { class: 'testnote' }, 'テスト仕様です。現状は、登録できません。'),
       h('form', { onsubmit: async (e) => {
         e.preventDefault(); err.textContent = '';
         lid.value = normId(lid.value);
