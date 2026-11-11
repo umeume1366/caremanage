@@ -5,7 +5,7 @@
 // - アクセス制御: すべての業務データを cm_id で分離。事業所アカウントは割り当てられた利用者のみ閲覧
 // - 監査ログ: ログイン、閲覧、投稿、設定変更を記録
 
-const VERSION = '2026-11-11c';
+const VERSION = '2026-11-11d';
 let lastError = null; // 直近のサーバーエラー（/api/health で確認できる。個人情報は含めない）
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -188,6 +188,8 @@ async function readJson(req) {
   }
 }
 const clientIp = (req) => req.headers.get('CF-Connecting-IP') || 'unknown';
+// ログインID：全角の英数字（１２３４ など）を半角に直し、空白を取る
+const normId = (v) => String(v || '').normalize('NFKC').replace(/\s+/g, '');
 function str(v, max, label, required = true) {
   if (v == null || v === '') {
     if (required) throw new HttpError(400, `${label}を入力してください`);
@@ -257,7 +259,7 @@ async function publicUser(env, u) {
 
 async function handleLogin(env, req) {
   const body = await readJson(req);
-  const loginId = str(body.login_id, 64, 'ログインID');
+  const loginId = normId(str(body.login_id, 64, 'ログインID'));
   const password = typeof body.password === 'string' ? body.password : '';
   const ip = clientIp(req);
   const t = now();
@@ -314,8 +316,8 @@ async function handleSetup(env, req) {
     await audit(env, req, null, 'setup_denied');
     throw new HttpError(403, 'セットアップキーが違います');
   }
-  const loginId = str(body.login_id, 64, 'ログインID');
-  if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは半角英数字4文字以上にしてください');
+  const loginId = normId(str(body.login_id, 64, 'ログインID'));
+  if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは、半角の英字・数字で4文字以上にしてください（例：1234）');
   checkPasswordPolicy(body.password);
   const name = str(body.name, 50, '氏名');
   await masterKeyBytes(env); // 鍵に問題があれば、何も書き込む前に止める
@@ -714,8 +716,8 @@ async function listAccounts(env, req, user) {
 }
 async function createAccount(env, req, user) {
   const b = await readJson(req);
-  const loginId = str(b.login_id, 64, 'ログインID');
-  if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは半角英数字4文字以上にしてください');
+  const loginId = normId(str(b.login_id, 64, 'ログインID'));
+  if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは、半角の英字・数字で4文字以上にしてください（例：1234）');
   const name = str(b.name, 50, '担当者名');
   const officeId = intId(b.office_id);
   const o = await env.DB.prepare('SELECT id FROM offices WHERE id = ? AND cm_id = ? AND active = 1').bind(officeId, user.cm_id).first();
@@ -847,7 +849,7 @@ async function directoryList(env, req, url) {
   const args = [pref, type];
   if (city) { sql += ' AND city = ?'; args.push(city); }
   if (q) { sql += " AND name LIKE ? ESCAPE '\\'"; args.push('%' + q.replace(/[\\%_]/g, (c) => '\\' + c) + '%'); }
-  sql += ' ORDER BY name LIMIT 300';
+  sql += url.searchParams.get('all') ? ' ORDER BY id LIMIT 8000' : ' ORDER BY name LIMIT 300';
   const rows = await env.DB.prepare(sql).bind(...args).all();
   return json(env, req, { offices: rows.results });
 }

@@ -349,13 +349,6 @@ img, video { max-width: 100%; }
 /* ---------- サービス種別をすべて並べる ---------- */
 .chip.none { opacity: .6; border-style: dashed; }
 .chip.none[aria-pressed="true"] { opacity: 1; }
-@media (min-width: 601px) {
-  .typebar { flex-wrap: wrap; overflow-x: visible; }
-  .typebar .chip { min-height: 2.1rem; padding: .1rem .8rem; font-size: .85rem; }
-}
-@media (max-width: 600px) {
-  .typebar .chip { font-size: .9rem; }
-}
 
 /* ---------- 事業所を一覧からえらぶ ---------- */
 .picker { padding: .8rem; margin: 0 0 1rem; min-width: 0; }
@@ -373,3 +366,47 @@ img, video { max-width: 100%; }
 .picklist button[aria-pressed="true"] .hint { color: var(--on-brand); }
 .picklist button[aria-pressed="true"] b::before { content: "✓ "; }
 select:disabled { opacity: .5; }
+
+/* ---------- サービス種別：居宅サービス・入所サービスの下に種別を並べる ---------- */
+.typebar { display: block; overflow-x: visible; padding: .6rem 1rem; }
+.chiprow { display: flex; flex-wrap: wrap; gap: .5rem; }
+.chiprow.sub { margin-top: .6rem; padding: .6rem; background: var(--brand-soft); border-radius: .8rem; }
+.chiprow.sub .chip { min-height: 2.1rem; padding: .1rem .8rem; font-size: .85rem; background: #fff; }
+.chip.grp { border-color: var(--brand-edge); color: var(--brand-ink); }
+.chip.grp[aria-pressed="true"] { background: var(--brand); border-color: var(--brand-edge); color: var(--on-brand); }
+.chip .arrow { margin-left: .4rem; font-size: .65rem; }
+.chiprow.sub .chip[aria-pressed="true"]:not(.t-day):not(.t-home):not(.t-nurse):not(.t-other) { background: var(--brand); }
+.chiprow.sub .chip.t-other[aria-pressed="true"] { background: var(--t-other); color: #fff; }
+.chiprow.sub .chip.t-day[aria-pressed="true"] { background: var(--t-day); color: #fff; }
+.chiprow.sub .chip.t-home[aria-pressed="true"] { background: var(--t-home); color: #fff; }
+.chiprow.sub .chip.t-nurse[aria-pressed="true"] { background: var(--t-nurse); color: #fff; }
+@media (max-width: 600px) {
+  .typebar { padding: .5rem .7rem; }
+  .chiprow { gap: .4rem; }
+  .chiprow.sub { padding: .5rem; max-height: 11.5rem; overflow-y: auto; }
+}
+
+/* ---------- メニューの見出し ---------- */
+.menuhead { margin: 1.2rem 1rem .3rem; font-size: .85rem; color: var(--sub); font-weight: 800; }
+.menu { border-top: 1px solid var(--line); }
+.menu.last { margin-top: 1.2rem; }
+.menu button .hint { display: block; font-weight: 400; margin-left: 1.9rem; }
+.testnote { margin: 0 0 1rem; padding: .6rem .8rem; background: var(--brand-soft); border: 2px dashed var(--brand-edge); border-radius: .6rem; font-weight: 700; }
+
+/* ---------- 改行を読みやすく（文の区切りのよいところで折り返す） ---------- */
+body { line-break: strict; overflow-wrap: anywhere; }
+h1, h2, h3, p, li, label, legend, button, .hint, .tag, .name, .meta, .preview, .empty, .listhead, .grouphead { word-break: auto-phrase; }
+h1, h2, h3, .btn, .logo, .tagline, .empty, .menu button, label.check { text-wrap: balance; }
+p, .hint, .bubble { text-wrap: pretty; }
+.bubble { word-break: normal; }
+.tag, .stype { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.rowline { row-gap: .4rem; }
+.card .hint { line-height: 1.5; }
+label.field > .hint { display: block; margin-top: .1rem; }
+label.check { line-height: 1.4; }
+label.check input { flex: none; }
+.btn { line-height: 1.3; }
+.login .tagline, .login h2 { line-height: 1.4; }
+.dialog h2 { line-height: 1.3; margin-bottom: .8rem; }
+.list .name { line-height: 1.35; }
+.topbar .iconbtn, .sizebtn, .chip, .tabs button { white-space: nowrap; }
