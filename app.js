@@ -23,9 +23,45 @@
   function safeSet(store, k, v) { try { v == null ? store.removeItem(k) : store.setItem(k, v); } catch { /* 無視 */ } }
 
   // ---------- 文字サイズ ----------
-  const SIZES = [['large', '大'], ['normal', '通常']];
-  function applySize(s) { document.documentElement.dataset.size = s; safeSet(localStorage, 'size', s); }
-  applySize(safeGet(localStorage, 'size') === 'normal' ? 'normal' : 'large');
+  // 押すたびに 通常 → 大 → 特大 → 通常… と切り替わる。ログインしている人ごとにサーバーへ保存し、次回もその大きさで開く
+  const SIZES = [['normal', '通常'], ['large', '大'], ['xlarge', '特大']];
+  const sizeOk = (v) => SIZES.some(([k]) => k === v);
+  function applySize(s) {
+    if (!sizeOk(s)) s = 'large';
+    document.documentElement.dataset.size = s; safeSet(localStorage, 'size', s);
+    document.querySelectorAll('.sizebtn .cur').forEach((x) => { x.textContent = sizeLabel(); });
+    document.querySelectorAll('.sizebtn').forEach((x) => { x.setAttribute('aria-label', `文字の大きさ（いまは${sizeLabel()}。押すと切り替わります）`); });
+  }
+  function sizeLabel() { return (SIZES.find(([k]) => k === document.documentElement.dataset.size) || SIZES[1])[1]; }
+  applySize(safeGet(localStorage, 'size') || 'large');
+  // ログインした人の設定を画面に反映
+  function useUserSize(u) { if (u && sizeOk(u.font_size)) applySize(u.font_size); }
+
+  // ---------- アプリとして使う（PWA：ホーム画面に追加） ----------
+  let installEvent = null;
+  const isApp = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvent = e; });
+  addEventListener('appinstalled', () => { installEvent = null; toast('ホーム画面に追加しました'); });
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* 使えなくても画面は動く */ }); });
+  }
+  async function installApp() {
+    if (installEvent) {
+      installEvent.prompt();
+      try { await installEvent.userChoice; } catch { /* 無視 */ }
+      installEvent = null;
+      return;
+    }
+    const steps = isIOS()
+      ? ['画面の下（または上）にある「共有」ボタン（□に↑のマーク）を押します。', '下へ動かして「ホーム画面に追加」を押します。', '右上の「追加」を押します。']
+      : ['画面の右上（または下）の「︙」メニューを押します。', '「ホーム画面に追加」または「アプリをインストール」を押します。', '「追加」「インストール」を押します。'];
+    dialog('ホーム画面に追加', h('div', null,
+      h('p', null, 'ホーム画面にケアつなぎのアイコンが置かれ、アプリのようにすぐ開けるようになります。'),
+      h('ol', { class: 'warnlist' }, steps.map((t) => h('li', null, t))),
+      isIOS() ? h('p', { class: 'hint' }, 'iPhone・iPad では Safari で開いてください。') : null),
+    (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
+  }
 
   // ---------- DOM ヘルパー（textContent のみ使用：画面への不正なHTML挿入を防ぐ） ----------
   function h(tag, attrs, ...children) {
@@ -141,6 +177,34 @@
     return close;
   }
 
+  // 削除の確認：「削除します」にチェックを入れてから押す（うっかり押しを防ぐ）
+  function confirmDelete(title, lines, run) {
+    const chk = h('input', { type: 'checkbox' });
+    const err = h('p', { class: 'error' });
+    dialog('削除の確認', h('div', null,
+      h('p', null, h('b', null, title)),
+      h('ul', { class: 'warnlist' }, lines.map((l) => h('li', null, l))),
+      h('label', { class: 'check' }, chk, ' 内容を確認しました。削除します'), err),
+    (close) => {
+      const go2 = h('button', { class: 'btn danger', disabled: true, onclick: async () => {
+        go2.disabled = true;
+        try { await run(); close(); } catch (ex) { err.textContent = ex.message; go2.disabled = false; }
+      } }, '削除する');
+      chk.addEventListener('change', () => { go2.disabled = !chk.checked; });
+      return [h('button', { class: 'btn secondary', onclick: close }, 'やめる'), go2];
+    });
+  }
+
+  // はい／いいえ の確認（ブラウザの確認ダイアログは使わない）
+  function askYes(msg) {
+    return new Promise((resolve) => {
+      dialog('確認', h('p', null, msg), (close) => [
+        h('button', { class: 'btn secondary', onclick: () => { close(); resolve(false); } }, 'いいえ'),
+        h('button', { class: 'btn', onclick: () => { close(); resolve(true); } }, 'はい'),
+      ]);
+    });
+  }
+
   // ---------- ルーティング ----------
   function go(hash) {
     if (MEM) { memHash = hash; app.style.height = ''; window.scrollTo(0, 0); route(); return; }
@@ -153,7 +217,7 @@
     document.querySelectorAll('.overlay').forEach((o) => o.remove());
     if (!S.token) return renderLogin();
     if (!S.user) {
-      try { S.user = (await api('GET', '/api/me')).user; } catch { return; }
+      try { S.user = (await api('GET', '/api/me')).user; useUserSize(S.user); } catch { return; }
     }
     if (S.user.must_change_pw) return renderPassword(true);
     const parts = (curHash() || '#/').slice(2).split('/');
@@ -162,6 +226,7 @@
     if (a === 'offices') return renderHome('offices');
     if (a === 'office' && b) return renderHome('clients', Number(b));
     if (a === 'menu') return renderMenu();
+    if (a === 'links' && S.user.role === 'provider') return renderLinks();
     if (a === 'password') return renderPassword(false);
     if (a === 'manage' && S.user.role === 'cm') return renderManage(b || 'clients', c);
     return renderHome('clients');
@@ -180,7 +245,7 @@
         btn.disabled = true; err.textContent = '';
         try {
           const r = await api('POST', '/api/login', { login_id: normId(idIn.value), password: pwIn.value });
-          S.token = r.token; S.user = r.user; S.lastActive = Date.now();
+          S.token = r.token; S.user = r.user; S.lastActive = Date.now(); useUserSize(r.user);
           safeSet(sessionStorage, 'token', r.token);
           go('#/');
         } catch (ex) { err.textContent = ex.message; btn.disabled = false; pwIn.value = ''; pwIn.focus(); }
@@ -195,9 +260,10 @@
       h('div', { class: 'logo' }, 'ケアつなぎ'),
       h('p', { class: 'tagline' }, 'ケアマネジャーと事業所をつなぐ連絡帳'),
       API === 'demo' ? h('div', { class: 'demo-note' }, h('b', null, 'デモモードで動いています'), h('br'),
-        'ケアマネ：cm-demo　事業所：office-demo / nurse-demo / day-demo', h('br'), 'パスワード（共通）：Demo-pass-123', h('br'),
+        'ケアマネ：cm-demo / cm2-demo　事業所：office-demo / nurse-demo / day-demo', h('br'), 'パスワード（共通）：Demo-pass-123', h('br'),
         h('span', { class: 'hint' }, '見本データです。再読み込みすると元に戻ります。')) : null,
       form,
+      isApp() ? null : h('p', { class: 'installrow' }, h('button', { type: 'button', class: 'btn secondary block', onclick: installApp }, '📲 ホーム画面に追加（アプリにする）')),
       h('div', { class: 'secure-note' }, '🔒 安心してお使いいただくために',
         h('ul', null,
           h('li', null, '通信と保存データはすべて暗号化しています'),
@@ -246,14 +312,17 @@
 
   // 右上の「文字」ボタン：押すたびに 大 ⇔ 通常 が切り替わる
   function sizeButton(light) {
-    const label = () => (document.documentElement.dataset.size === 'normal' ? '通常' : '大');
-    const cur = h('span', { class: 'cur' }, label());
-    const btn = h('button', { type: 'button', class: 'sizebtn' + (light ? ' light' : ''), 'aria-label': `文字の大きさ（いまは${label()}。押すと切り替わります）` },
+    const cur = h('span', { class: 'cur' }, sizeLabel());
+    const btn = h('button', { type: 'button', class: 'sizebtn' + (light ? ' light' : ''), 'aria-label': `文字の大きさ（いまは${sizeLabel()}。押すと切り替わります）` },
       h('span', { class: 'aa', 'aria-hidden': 'true' }, 'あ'), '文字', cur);
     btn.addEventListener('click', () => {
-      applySize(document.documentElement.dataset.size === 'normal' ? 'large' : 'normal');
-      document.querySelectorAll('.sizebtn .cur').forEach((x) => { x.textContent = label(); });
-      document.querySelectorAll('.sizebtn').forEach((x) => { x.setAttribute('aria-label', `文字の大きさ（いまは${label()}。押すと切り替わります）`); });
+      const i = SIZES.findIndex(([k]) => k === document.documentElement.dataset.size);
+      const next = SIZES[(i + 1) % SIZES.length][0];
+      applySize(next);
+      if (S.token && S.user) {
+        S.user.font_size = next;
+        api('POST', '/api/me/prefs', { font_size: next }).catch(() => { /* 保存できなくても表示は変える */ });
+      }
     });
     return h('div', { class: 'sizewrap' }, btn);
   }
@@ -331,7 +400,27 @@
     const chipBox = h('div', { class: 'typebar', role: 'group', 'aria-label': 'サービス種別で切り替え' });
     const search = h('input', { type: 'search', id: 'room-search', placeholder: '🔍 名前でさがす', 'aria-label': '利用者の名前でさがす', value: S.q || '' });
     const searchBox = tab === 'clients' && !officeId ? h('div', { class: 'searchbar' }, search) : null;
-    mount(topbar(title, { sub: `${S.user.name} さん`, right: menuButton(), dog: true }), tabs, isCm && !officeId ? chipBox : null, searchBox, h('main', null, listBox));
+    // 事業所：複数のケアマネとつながっているときは、ケアマネで絞り込める
+    const cmBox = !isCm ? h('div', { class: 'typebar', role: 'group', 'aria-label': 'ケアマネジャーで切り替え' }) : null;
+    const notice = !isCm ? h('button', { class: 'notice', hidden: true, onclick: () => go('#/links') }) : null;
+    function drawNotice() {
+      if (!notice) return;
+      notice.hidden = !S.user.pending;
+      fill(notice, `🔔 ケアマネジャーから「つながる依頼」が ${S.user.pending || 0}件 届いています`, h('span', { class: 'go' }, '確認する ›'));
+    }
+    drawNotice();
+    mount(topbar(title, { sub: `${S.user.name} さん`, right: menuButton(), dog: true }), tabs, notice, isCm && !officeId ? chipBox : cmBox, searchBox, h('main', null, listBox));
+    if (!isCm && S.cmFilter == null) S.cmFilter = 'all';
+    let cms = [];
+    function drawCms() {
+      if (!cmBox) return;
+      if (cms.length < 2) { cmBox.hidden = true; return; }
+      cmBox.hidden = false;
+      fill(cmBox, h('div', { class: 'chiprow' },
+        h('button', { type: 'button', class: 'chip grp', 'aria-pressed': String(S.cmFilter === 'all'), onclick: () => { S.cmFilter = 'all'; drawCms(); drawRooms(); } }, 'すべて'),
+        cms.map((c) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(S.cmFilter === c.id), onclick: () => { S.cmFilter = c.id; drawCms(); drawRooms(); } },
+          c.name, h('span', { class: 'cnt' }, `${rooms.filter((r) => r.cm && r.cm.id === c.id).length}`)))));
+    }
 
     let offices = [], rooms = [];
     function drawChips() {
@@ -352,7 +441,8 @@
 
     function drawRooms() {
       const q = (S.q || '').trim();
-      const shown = q ? rooms.filter((r) => r.name.replace(/\s/g, '').includes(q.replace(/\s/g, ''))) : rooms;
+      const base = !isCm && S.cmFilter !== 'all' && cms.some((c) => c.id === S.cmFilter) ? rooms.filter((r) => r.cm && r.cm.id === S.cmFilter) : rooms;
+      const shown = q ? base.filter((r) => r.name.replace(/\s/g, '').includes(q.replace(/\s/g, ''))) : base;
       const nodes = [];
       if (officeId) {
         const o = offices.find((x) => x.id === officeId);
@@ -360,6 +450,8 @@
           h('button', { class: 'btn secondary', onclick: () => go('#/offices') }, '事業所一覧へ')));
       } else if (isCm && S.svc !== 'all') {
         nodes.push(h('p', { class: 'listhead' }, `${svcLabel()}を利用している方：${shown.length}人`));
+      } else if (!isCm && S.cmFilter !== 'all' && cms.length > 1) {
+        nodes.push(h('p', { class: 'listhead' }, `${(cms.find((c) => c.id === S.cmFilter) || {}).name || ''} さんの担当：${shown.length}人`));
       } else {
         nodes.push(h('p', { class: 'listhead' }, `${q ? '該当' : '利用者'}：${shown.length}人`));
       }
@@ -369,7 +461,8 @@
           h('span', { class: 'main' },
             h('div', { class: 'name' }, r.name, ' 様'),
             h('div', { class: 'preview' }, r.last_message || 'メッセージはまだありません'),
-            isCm ? h('div', { class: 'meta' }, r.offices.length ? r.offices.map((o) => typeTag(o.service_type)) : '共有している事業所なし') : null),
+            isCm ? h('div', { class: 'meta' }, r.offices.length ? r.offices.map((o) => typeTag(o.service_type)) : '共有している事業所なし')
+              : r.cm && cms.length > 1 ? h('div', { class: 'meta' }, h('span', { class: 'tag cmtag' }, '担当ケアマネ：', r.cm.name)) : null),
           h('span', { class: 'right' }, fmtShort(r.last_at), h('br'), r.unread ? h('span', { class: 'badge' }, r.unread > 99 ? '99+' : r.unread) : null),
         )))) : h('p', { class: 'empty' }, q ? `「${q}」に当てはまる利用者はいません。` : isCm ? (S.svc !== 'all' ? `${svcLabel()}の事業所と共有している利用者はいません。` : 'まだ利用者が登録されていません。メニュー →「利用者の管理」から登録できます。') : '共有されている利用者はまだいません。'));
       fill(listBox, ...nodes);
@@ -405,7 +498,12 @@
         if (tab === 'offices') { drawOffices(); return; }
         const sel = isCm && !officeId ? svcTypes() : null;
         const q = officeId ? `?office_id=${officeId}` : (sel && sel.length === 1 ? `?service_type=${encodeURIComponent(sel[0])}` : '');
-        rooms = (await api('GET', '/api/rooms' + q)).rooms;
+        const got = await api('GET', '/api/rooms' + q);
+        rooms = got.rooms;
+        if (!isCm) {
+          cms = got.cms || []; drawCms();
+          try { S.user = (await api('GET', '/api/me')).user; drawNotice(); } catch { /* そのまま */ }
+        }
         // 大分類（居宅・入所）で絞るときは、画面側でまとめて絞り込む
         if (sel && sel.length > 1) rooms = rooms.filter((r) => r.offices.some((o) => sel.includes(o.service_type)));
         drawRooms();
@@ -573,6 +671,7 @@
 
     let lastId = 0, lastDay = '', roomName = '';
     const mineReadEls = new Map();
+    const shown = new Set(); // 表示済みのメッセージ（同じものを2回出さない）
 
     try {
       const { rooms } = await api('GET', '/api/rooms');
@@ -581,13 +680,15 @@
       roomName = r.name;
       header.replaceWith(topbar(r.name + ' 様', {
         back: () => go('#/'),
-        sub: r.offices.length ? '共有先：' + r.offices.map(officeLabel).join('、') : '共有先の事業所なし',
+        sub: (r.cm ? `担当ケアマネ：${r.cm.name}　` : '') + (r.offices.length ? '共有先：' + r.offices.map(officeLabel).join('、') : '共有先の事業所なし'),
       }));
     } catch (ex) { scroll.replaceChildren(h('p', { class: 'empty error' }, ex.message)); return; }
 
     function addMessages(list) {
       const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
       for (const m of list) {
+        if (shown.has(m.id)) continue;
+        shown.add(m.id);
         const day = fmtDay(m.created_at);
         if (day !== lastDay) { scroll.append(h('div', { class: 'daysep' }, h('span', null, day))); lastDay = day; }
         const readEl = m.mine ? h('div', null, m.read_count ? `既読 ${m.read_count}` : '') : null;
@@ -609,6 +710,18 @@
       }
     }
 
+    // 新しいメッセージの取り込みは、同時に1つだけ行う（重なると同じ吹き出しが2つ出るため）
+    let pulling = null, sending = false;
+    async function pull() {
+      while (pulling) { try { await pulling; } catch { /* 次へ */ } }
+      pulling = (async () => {
+        const more = await api('GET', `/api/rooms/${clientId}/messages?after=${lastId}`);
+        if (more.messages.length) { scroll.querySelector('.empty')?.remove(); addMessages(more.messages); }
+        applyReads(more.reads);
+      })();
+      try { await pulling; } finally { pulling = null; }
+    }
+
     try {
       const { messages, can_post } = await api('GET', `/api/rooms/${clientId}/messages`);
       if (!messages.length) scroll.append(h('p', { class: 'empty' }, `${roomName} 様についての連絡はまだありません。`));
@@ -618,12 +731,7 @@
         const ta = h('textarea', { rows: '1', 'aria-label': 'メッセージを入力', placeholder: 'メッセージを入力', maxlength: '4000' });
         const send = h('button', { class: 'btn', type: 'submit' }, '送信');
         const fileIn = h('input', { type: 'file', accept: 'image/*,application/pdf,.pdf,text/csv,.csv', hidden: true, id: 'file-input' });
-        const refresh = async () => {
-          const more = await api('GET', `/api/rooms/${clientId}/messages?after=${lastId}`);
-          scroll.querySelector('.empty')?.remove();
-          addMessages(more.messages);
-          applyReads(more.reads);
-        };
+        const refresh = () => pull();
         fileIn.addEventListener('change', () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) confirmUpload(clientId, f, () => refresh().catch(() => {})); });
         const attach = h('button', { type: 'button', class: 'attachbtn', 'aria-label': '写真・PDF・CSVを送る', onclick: () => fileIn.click() }, '📎');
         ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 240) + 'px'; });
@@ -631,18 +739,25 @@
           class: 'composer',
           onsubmit: async (e) => {
             e.preventDefault();
+            if (sending) return; // 送信中はもう一度押しても送らない
             const text = ta.value.trim();
             if (!text) return;
-            send.disabled = true;
+            sending = true; send.disabled = true; send.textContent = '送信中…';
+            // 押した瞬間に入力欄を空にして、「送信中」の吹き出しをすぐ出す
+            ta.value = ''; ta.style.height = 'auto';
+            scroll.querySelector('.empty')?.remove();
+            const temp = h('div', { class: 'msg mine sending' }, h('div', { class: 'row' }, h('div', { class: 'bubble' }, h('div', { class: 'btext' }, text)), h('div', { class: 'time' }, '送信中…')));
+            scroll.append(temp); scroll.scrollTop = scroll.scrollHeight;
             try {
               await api('POST', `/api/rooms/${clientId}/messages`, { body: text });
-              ta.value = ''; ta.style.height = 'auto';
-              const more = await api('GET', `/api/rooms/${clientId}/messages?after=${lastId}`);
-              scroll.querySelector('.empty')?.remove();
-              addMessages(more.messages);
-              applyReads(more.reads);
-            } catch (ex) { toast(ex.message, true); }
-            send.disabled = false; ta.focus();
+              temp.remove();
+              await pull();
+            } catch (ex) {
+              temp.remove();
+              if (!ta.value) ta.value = text; // 送れなかったときは文字を戻す
+              toast(ex.message, true);
+            }
+            sending = false; send.disabled = false; send.textContent = '送信'; ta.focus();
           },
         }, fileIn, attach, ta, send));
       } else {
@@ -650,13 +765,7 @@
       }
     } catch (ex) { scroll.replaceChildren(h('p', { class: 'empty error' }, ex.message)); return; }
 
-    every(5000, async () => {
-      try {
-        const { messages, reads } = await api('GET', `/api/rooms/${clientId}/messages?after=${lastId}`);
-        if (messages.length) { scroll.querySelector('.empty')?.remove(); addMessages(messages); }
-        applyReads(reads);
-      } catch { /* 次回再試行 */ }
-    });
+    every(5000, async () => { if (sending || pulling) return; try { await pull(); } catch { /* 次回再試行 */ } });
   }
   addEventListener('hashchange', () => { app.style.height = ''; });
 
@@ -670,6 +779,10 @@
             h('h3', null, S.user.name, ' さん'),
             h('div', { class: 'hint' }, isCm ? 'ケアマネジャー' : `${S.user.office?.name || ''}（${S.user.office?.can_post ? '返信できる' : '閲覧のみ'}）`),
             h('div', { class: 'hint' }, 'ログインID：', S.user.login_id))),
+        !isCm ? h('ul', { class: 'menu' },
+          h('li', null, h('button', { onclick: () => go('#/links') }, '🤝 つながっているケアマネジャー',
+            S.user.pending ? h('span', { class: 'badge' }, S.user.pending) : null,
+            h('span', { class: 'hint' }, S.user.pending ? '新しい依頼が届いています' : `${S.user.links || 0}人とつながっています`)))) : null,
         isCm ? h('h2', { class: 'menuhead' }, '登録・管理') : null,
         isCm ? h('ul', { class: 'menu' },
           h('li', null, h('button', { onclick: () => go('#/manage/clients') }, '👤 利用者の管理')),
@@ -680,8 +793,45 @@
           h('ul', { class: 'menu' },
           h('li', null, h('button', { onclick: () => go('#/password') }, '🔒 パスワード変更')),
           isCm ? h('li', null, h('button', { onclick: () => go('#/manage/audit') }, '📋 操作の記録（監査ログ）', h('span', { class: 'hint' }, 'だれが・いつ見たかを確認できます'))) : null)),
+        isApp() ? null : h('ul', { class: 'menu' },
+          h('li', null, h('button', { onclick: installApp }, '📲 ホーム画面に追加（アプリにする）',
+            h('span', { class: 'hint' }, 'アイコンを押すだけで、すぐ開けるようになります')))),
         h('ul', { class: 'menu last' },
           h('li', null, h('button', { onclick: doLogout }, '🚪 ログアウト')))));
+  }
+
+  // ---------- つながっているケアマネジャー（事業所のみ） ----------
+  async function renderLinks() {
+    const body = h('main', { class: 'page' }, h('p', { class: 'empty loading' }, '読み込み中…'));
+    mount(topbar('つながっているケアマネジャー', { back: () => go('#/menu') }), body);
+    const refresh = async () => { try { S.user = (await api('GET', '/api/me')).user; } catch { /* そのまま */ } route(); };
+    let links;
+    try { links = (await api('GET', '/api/links')).links; } catch (ex) { fill(body, h('p', { class: 'empty error' }, ex.message)); return; }
+    const pending = links.filter((l) => l.status === 'pending');
+    const active = links.filter((l) => l.status !== 'pending');
+    const answer = (l, accept) => async () => {
+      if (!accept && !(await askYes(`${l.cm_name} さんとのつながりを${l.status === 'pending' ? '断り' : '外し'}ますか？`))) return;
+      try { await api('POST', `/api/links/${l.cm_id}/${accept ? 'accept' : 'remove'}`); toast(accept ? 'つながりました' : '外しました'); refresh(); } catch (ex) { toast(ex.message, true); }
+    };
+    fill(body,
+      h('p', { class: 'hint' }, 'このログインIDひとつで、ここに並んでいるケアマネジャーの利用者をまとめて見られます。見えるのは、それぞれのケアマネジャーがこの事業所に共有した利用者だけです。'),
+      pending.length ? [h('h2', { class: 'menuhead' }, `🔔 届いている依頼（${pending.length}件）`),
+        pending.map((l) => h('div', { class: 'card pending' },
+          h('h3', null, l.cm_name, ' さん（ケアマネジャー）'),
+          h('div', { class: 'hint' }, 'この事業所を「', l.office_name, '」として登録しています'),
+          h('div', { class: 'rowline' },
+            h('button', { class: 'btn', onclick: answer(l, true) }, '承認する'),
+            h('button', { class: 'btn secondary', onclick: answer(l, false) }, '断る'))))] : null,
+      h('h2', { class: 'menuhead' }, `つながっているケアマネジャー（${active.length}人）`),
+      active.length ? active.map((l) => h('div', { class: 'card' },
+        h('h3', null, l.cm_name, ' さん'),
+        h('div', { class: 'hint' }, '登録名：', l.office_name, '・', l.can_post ? '返信できる' : '閲覧のみ'),
+        h('div', { class: 'rowline' },
+          h('span', { class: 'tag ' + (l.active ? 'ok' : 'ng') }, l.active ? '共有中' : '停止中'),
+          l.home ? h('span', { class: 'tag' }, 'このIDを発行したケアマネ') : null),
+        l.home ? null : h('div', { class: 'rowline' }, h('button', { class: 'btn secondary', onclick: answer(l, false) }, 'つながりを外す')),
+      )) : h('p', { class: 'empty' }, 'まだつながっているケアマネジャーはいません'),
+    );
   }
 
   // ---------- 管理（ケアマネのみ） ----------
@@ -871,7 +1021,7 @@
           h('button', {
             class: 'btn ' + (o.active ? 'danger' : 'secondary'),
             onclick: async () => {
-              const msg = o.active ? `「${o.name}」の共有を停止します。所属アカウントもログインできなくなります。よろしいですか？` : `「${o.name}」を再開しますか？（アカウントは個別に有効化してください）`;
+              const msg = o.active ? `「${o.name}」との共有を停止します。この事業所のアカウントから、あなたの利用者が見えなくなります。よろしいですか？` : `「${o.name}」との共有を再開しますか？`;
               dialog('確認', h('p', null, msg), (close) => [
                 h('button', { class: 'btn secondary', onclick: close }, 'やめる'),
                 h('button', { class: 'btn' + (o.active ? ' danger' : ''), onclick: async () => {
@@ -879,6 +1029,10 @@
                 } }, o.active ? '停止する' : '再開する')]);
             },
           }, o.active ? '共有を停止' : '再開'),
+          h('button', { class: 'btn danger outline', onclick: () => confirmDelete(
+            `「${o.name}」を削除します。`,
+            ['この事業所は、利用者の共有先から外れます。', 'この事業所につないだアカウントからは、あなたの利用者が見えなくなります。', 'これまでのやり取りは残ります。', '削除は元に戻せません。しばらく使わないだけなら「共有を停止」をおすすめします。'],
+            async () => { await api('POST', `/api/offices/${o.id}/delete`); toast('削除しました'); reload(); }) }, '削除'),
         ))) : h('p', { class: 'empty' }, '事業所はまだありません'),
     );
   }
@@ -935,7 +1089,11 @@
           h('button', { class: 'btn secondary', onclick: () => openForm(c) }, '編集'),
           h('button', { class: 'btn secondary', onclick: async () => {
             try { await api('PATCH', '/api/clients/' + c.id, { archived: !c.archived }); reload(); } catch (ex) { toast(ex.message, true); }
-          } }, c.archived ? '支援を再開' : '支援終了（非表示）')),
+          } }, c.archived ? '支援を再開' : '支援終了（非表示）'),
+          h('button', { class: 'btn danger outline', onclick: () => confirmDelete(
+            `「${c.name} 様」を削除します。`,
+            ['この方とのやり取り・写真・PDF などが、すべて消えます。', '削除は元に戻せません。記録を残したいときは「支援終了（非表示）」を使ってください。'],
+            async () => { await api('POST', `/api/clients/${c.id}/delete`); toast('削除しました'); reload(); }) }, '削除')),
       )) : h('p', { class: 'empty' }, '利用者はまだいません'),
     );
   }
@@ -956,12 +1114,14 @@
   async function manageAccounts(body) {
     const [{ accounts }, { offices }] = await Promise.all([api('GET', '/api/accounts'), api('GET', '/api/offices')]);
     const officeName = new Map(offices.map((o) => [o.id, officeLabel(o)]));
+    const officeSelect = () => h('select', null, offices.filter((o) => o.active).map((o) => h('option', { value: String(o.id) }, officeLabel(o))));
     const openForm = () => {
-      const office = h('select', null, offices.filter((o) => o.active).map((o) => h('option', { value: String(o.id) }, officeLabel(o))));
+      const office = officeSelect();
       const name = h('input', { type: 'text', maxlength: '50' });
       const loginId = h('input', { type: 'text', autocapitalize: 'off', maxlength: '64' });
       const err = h('p', { class: 'error' });
-      dialog('アカウントを発行', h('div', null,
+      dialog('新しいIDを発行', h('div', null,
+        h('p', { class: 'hint' }, 'まだケアつなぎのIDを持っていない事業所に、IDを発行します。'),
         h('label', { class: 'field' }, '事業所', office),
         h('label', { class: 'field' }, '担当者名', name),
         h('label', { class: 'field' }, 'ログインID', h('span', { class: 'hint' }, '（半角の英字・数字で4文字以上。数字だけでも大丈夫です。例：1234）'), loginId),
@@ -979,24 +1139,60 @@
         }, '発行する'),
       ]);
     };
-    fill(body, 
-      h('p', null, h('button', { class: 'btn block', onclick: openForm, disabled: !offices.some((o) => o.active) }, '＋ アカウントを発行')),
-      accounts.length ? accounts.map((a) => h('div', { class: 'card' },
-        h('h3', null, a.name),
-        h('div', { class: 'hint' }, officeName.get(a.office_id) || '', '・ID：', a.login_id),
-        h('div', { class: 'hint' }, '最終ログイン：', a.last_login ? fmtFull(a.last_login) : 'なし'),
-        h('div', { class: 'rowline' },
-          h('span', { class: 'tag ' + (a.active ? 'ok' : 'ng') }, a.active ? '有効' : '停止中'),
-          a.locked ? h('span', { class: 'tag ng' }, 'ロック中') : null),
-        h('div', { class: 'rowline' },
-          h('button', { class: 'btn secondary', onclick: async () => {
-            const pw = genPassword();
-            try { await api('PATCH', '/api/accounts/' + a.id, { password: pw }); showPassword(a.login_id, pw); } catch (ex) { toast(ex.message, true); }
-          } }, 'パスワード再発行'),
-          h('button', { class: 'btn ' + (a.active ? 'danger' : 'secondary'), onclick: async () => {
-            try { await api('PATCH', '/api/accounts/' + a.id, { active: !a.active }); reload(); } catch (ex) { toast(ex.message, true); }
-          } }, a.active ? '停止' : '有効にする')),
-      )) : h('p', { class: 'empty' }, 'アカウントはまだありません'),
+    const openLink = () => {
+      const office = officeSelect();
+      const loginId = h('input', { type: 'text', autocapitalize: 'off', maxlength: '64', inputmode: 'text' });
+      const err = h('p', { class: 'error' });
+      dialog('発行済みのIDとつなぐ', h('div', null,
+        h('p', { class: 'hint' }, 'ほかのケアマネジャーからすでにIDをもらっている事業所は、そのIDとつなぐだけで使えます。新しいIDやパスワードは不要です。'),
+        h('label', { class: 'field' }, 'この事業所として共有します', office),
+        h('label', { class: 'field' }, '事業所のログインID', h('span', { class: 'hint' }, '（事業所の方に聞いてください）'), loginId),
+        h('p', { class: 'hint' }, '事業所の方が「承認」すると、あなたが共有した利用者が見えるようになります。'), err),
+      (close) => [
+        h('button', { class: 'btn secondary', onclick: close }, 'やめる'),
+        h('button', {
+          class: 'btn', onclick: async () => {
+            try {
+              await api('POST', '/api/accounts/link', { office_id: Number(office.value), login_id: normId(loginId.value) });
+              close(); toast('依頼しました。事業所の方の承認を待っています'); reload();
+            } catch (ex) { err.textContent = ex.message; }
+          },
+        }, '依頼する'),
+      ]);
+    };
+    const patch = (a, data, msg) => async () => {
+      if (msg && !(await askYes(msg))) return;
+      try { await api('PATCH', '/api/accounts/' + a.id, data); reload(); } catch (ex) { toast(ex.message, true); }
+    };
+    const noOffice = !offices.some((o) => o.active);
+    fill(body,
+      h('p', { class: 'hint' }, '事業所のIDは1つで、複数のケアマネジャーと共有できます。ほかのケアマネジャーからすでにIDをもらっている事業所は「発行済みのIDとつなぐ」を使ってください。'),
+      h('div', { class: 'rowline wide' },
+        h('button', { class: 'btn', onclick: openForm, disabled: noOffice }, '＋ 新しいIDを発行'),
+        h('button', { class: 'btn secondary', onclick: openLink, disabled: noOffice }, '🔗 発行済みのIDとつなぐ')),
+      accounts.length ? accounts.map((a) => {
+        const pending = a.status === 'pending';
+        return h('div', { class: 'card' },
+          h('h3', null, a.name),
+          h('div', { class: 'hint' }, officeName.get(a.office_id) || '', '・ID：', a.login_id),
+          pending ? null : h('div', { class: 'hint' }, '最終ログイン：', a.last_login ? fmtFull(a.last_login) : 'なし'),
+          h('div', { class: 'rowline' },
+            pending ? h('span', { class: 'tag wait' }, '承認待ち') : h('span', { class: 'tag ' + (a.active ? 'ok' : 'ng') }, a.active ? '有効' : '停止中'),
+            a.home ? h('span', { class: 'tag' }, 'あなたが発行') : h('span', { class: 'tag' }, 'ほかのケアマネが発行'),
+            a.shared ? h('span', { class: 'tag' }, 'ほかのケアマネとも共有中') : null,
+            a.locked ? h('span', { class: 'tag ng' }, 'ロック中') : null),
+          h('div', { class: 'rowline' },
+            pending ? h('button', { class: 'btn secondary', onclick: patch(a, { remove: true }, '依頼を取り消しますか？') }, '依頼を取り消す') : [
+              a.home && !a.shared ? h('button', { class: 'btn secondary', onclick: async () => {
+                const pw = genPassword();
+                try { await api('PATCH', '/api/accounts/' + a.id, { password: pw }); showPassword(a.login_id, pw); } catch (ex) { toast(ex.message, true); }
+              } }, 'パスワード再発行') : null,
+              h('button', { class: 'btn ' + (a.active ? 'danger' : 'secondary'), onclick: patch(a, { active: !a.active }) }, a.active ? '停止' : '有効にする'),
+              a.home ? null : h('button', { class: 'btn secondary', onclick: patch(a, { remove: true }, 'この事業所とのつながりを外しますか？') }, 'つながりを外す'),
+            ]),
+          a.home && a.shared ? h('p', { class: 'hint' }, 'ほかのケアマネとも共有しているため、パスワードを忘れたときは事業所の方ご自身で変更してもらいます（ログイン後のメニュー →「パスワード変更」）。') : null,
+        );
+      }) : h('p', { class: 'empty' }, 'アカウントはまだありません'),
     );
   }
 
@@ -1006,7 +1202,8 @@
     room_view: 'トーク閲覧', message_post: 'メッセージ送信', file_upload: 'ファイル送信', file_view: 'ファイル閲覧',
     office_create: '事業所登録', office_update: '事業所変更', client_create: '利用者登録', client_update: '利用者変更',
     account_create: 'アカウント発行', account_reset_pw: 'パスワード再発行', account_enable: 'アカウント有効化', account_disable: 'アカウント停止',
-    cm_created: 'ケアマネ登録',
+    cm_created: 'ケアマネ登録', client_delete: '利用者を削除', office_delete: '事業所を削除', account_link_request: 'つながる依頼', account_unlink: 'つながりを外す',
+    link_accept: '事業所が依頼を承認', link_reject: '事業所が依頼を断る', link_remove: '事業所がつながりを外す',
   };
   async function manageAudit(body) {
     const { logs } = await api('GET', '/api/audit');

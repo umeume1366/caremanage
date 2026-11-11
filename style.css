@@ -428,3 +428,22 @@ label.check input { flex: none; }
 .menufold summary:hover { background: var(--brand-soft); }
 .menufold .menu li:last-child button { border-bottom: none; }
 .addoffice { margin: .6rem 0 0; }
+
+/* ---------- 事業所IDの共有（複数のケアマネとつながる） ---------- */
+.notice { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: .5rem; padding: .7rem 1rem; border: 0; border-bottom: 2px solid var(--brand-edge, #e0b800); background: var(--brand-soft, #fff8d6); color: var(--brand-ink, #5a4200); font-weight: 700; text-align: left; cursor: pointer; }
+.notice[hidden] { display: none; }
+.notice .go { white-space: nowrap; text-decoration: underline; }
+.tag.wait { background: #fff1c9; color: #6b4a00; }
+.tag.cmtag { background: var(--brand-soft, #fff8d6); color: var(--brand-ink, #5a4200); }
+.card.pending { border-color: var(--brand-edge, #e0b800); background: var(--brand-soft, #fff8d6); }
+.rowline.wide { margin: 0 0 1rem; }
+.rowline.wide .btn { flex: 1 1 12rem; }
+.menu .badge { margin-left: .4rem; }
+.typebar[hidden] { display: none; }
+
+/* 送信中の吹き出し・削除の確認 */
+.msg.sending .bubble { opacity: .6; }
+.msg.sending .time { font-weight: 700; }
+.warnlist { margin: .3rem 0 .8rem; padding-left: 1.2rem; line-height: 1.6; }
+.warnlist li { margin: .2rem 0; }
+.installrow { margin: 1rem 0 0; }

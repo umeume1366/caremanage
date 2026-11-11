@@ -8,18 +8,22 @@
   <!-- 外部スクリプトを一切読み込まない設定（不正スクリプト対策） -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; frame-src blob:; connect-src 'self' https://*.workers.dev http://localhost:8787 http://127.0.0.1:8787; base-uri 'none'; form-action 'none'">
   <title>ケアつなぎ</title>
-  <link rel="icon" href="favicon.svg?v=1111f" type="image/svg+xml">
-  <link rel="icon" href="icon-192.png?v=1111f" type="image/png" sizes="192x192">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=1111f">
-  <link rel="manifest" href="manifest.webmanifest?v=1111f">
+  <link rel="icon" href="favicon.svg?v=1111i" type="image/svg+xml">
+  <link rel="icon" href="icon-192.png?v=1111i" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=1111i">
+  <link rel="manifest" href="manifest.webmanifest?v=1111i">
   <meta name="theme-color" content="#ffd400">
-  <link rel="stylesheet" href="style.css?v=1111f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="ケアつなぎ">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="stylesheet" href="style.css?v=1111i">
 </head>
 <body>
   <div id="app" aria-live="polite"></div>
   <div id="toast" role="status" aria-live="assertive"></div>
-  <script src="config.js?v=1111f"></script>
-  <script src="demo-api.js?v=1111f"></script>
-  <script src="app.js?v=1111f"></script>
+  <script src="config.js?v=1111i"></script>
+  <script src="demo-api.js?v=1111i"></script>
+  <script src="app.js?v=1111i"></script>
 </body>
 </html>

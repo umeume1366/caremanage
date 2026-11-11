@@ -3,9 +3,10 @@
 // - セッション: ランダムトークン（DBにはSHA-256ハッシュのみ）、無操作30分 / 最長12時間で失効
 // - 保存データ: 氏名・メモ・本文を AES-256-GCM で暗号化。鍵はマスター鍵からケアマネ毎に HKDF で導出
 // - アクセス制御: すべての業務データを cm_id で分離。事業所アカウントは割り当てられた利用者のみ閲覧
+// - 事業所アカウントは1つのIDで複数のケアマネとつながれる（provider_links）。ケアマネごとに承認・停止できる
 // - 監査ログ: ログイン、閲覧、投稿、設定変更を記録
 
-const VERSION = '2026-11-11d';
+const VERSION = '2026-11-11f';
 let lastError = null; // 直近のサーバーエラー（/api/health で確認できる。個人情報は含めない）
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -243,9 +244,18 @@ function requirePwChanged(user) {
 
 async function publicUser(env, u) {
   let office = null;
-  if (u.role === 'provider' && u.office_id) {
-    const o = await env.DB.prepare('SELECT * FROM offices WHERE id = ? AND cm_id = ?').bind(u.office_id, u.cm_id).first();
-    if (o) office = { id: o.id, name: await open(env, o.cm_id, o.name), can_post: !!o.can_post, service_type: o.service_type };
+  let links = 0, pending = 0;
+  if (u.role === 'provider') {
+    const rows = (await env.DB.prepare('SELECT cm_id, office_id, status, active FROM provider_links WHERE user_id = ?').bind(u.id).all()).results;
+    pending = rows.filter((l) => l.status === 'pending').length;
+    const act = rows.filter((l) => l.status === 'active' && l.active);
+    links = act.length;
+    // 画面の上に出す事業所名：最初に発行したケアマネの登録名（なければ、つながっている最初のケアマネの登録名）
+    const l = act.find((x) => x.cm_id === u.cm_id) || act[0] || (u.office_id ? { cm_id: u.cm_id, office_id: u.office_id } : null);
+    if (l) {
+      const o = await env.DB.prepare('SELECT * FROM offices WHERE id = ? AND cm_id = ?').bind(l.office_id, l.cm_id).first();
+      if (o) office = { id: o.id, name: await open(env, o.cm_id, o.name), can_post: !!o.can_post, service_type: o.service_type };
+    }
   }
   return {
     id: u.id,
@@ -253,7 +263,9 @@ async function publicUser(env, u) {
     login_id: u.login_id,
     name: await open(env, u.cm_id, u.display_name),
     must_change_pw: !!u.must_change_pw,
+    font_size: (await env.DB.prepare('SELECT font_size FROM user_prefs WHERE user_id = ?').bind(u.id).first())?.font_size || null,
     office,
+    ...(u.role === 'provider' ? { links, pending } : {}),
   };
 }
 
@@ -342,6 +354,26 @@ async function handleSetup(env, req) {
 }
 
 // ---------- アクセス判定 ----------
+// 事業所アカウントは、つながっているケアマネごとに「そのケアマネの立場」で処理する。
+// （cm_id と office_id を、そのケアマネ側の値に置き換えた user を作る）
+function asLinked(user, link) {
+  return { ...user, cm_id: link.cm_id, office_id: link.office_id, home_cm_id: user.cm_id };
+}
+async function activeLinks(env, user) {
+  const rows = await env.DB.prepare(
+    `SELECT l.cm_id, l.office_id FROM provider_links l JOIN offices o ON o.id = l.office_id AND o.cm_id = l.cm_id
+      WHERE l.user_id = ? AND l.status = 'active' AND l.active = 1 AND o.active = 1 ORDER BY l.created_at`
+  ).bind(user.id).all();
+  return rows.results;
+}
+async function ctxForClient(env, user, clientId) {
+  if (user.role === 'cm') return user;
+  const c = await env.DB.prepare('SELECT cm_id FROM clients WHERE id = ?').bind(clientId).first();
+  if (!c) throw new HttpError(404, '見つかりません');
+  const l = await env.DB.prepare("SELECT cm_id, office_id FROM provider_links WHERE user_id = ? AND cm_id = ? AND status = 'active' AND active = 1").bind(user.id, c.cm_id).first();
+  if (!l) throw new HttpError(404, '見つかりません');
+  return asLinked(user, l);
+}
 async function loadClientForUser(env, user, clientId) {
   const c = await env.DB.prepare('SELECT * FROM clients WHERE id = ? AND cm_id = ?').bind(clientId, user.cm_id).first();
   if (!c) throw new HttpError(404, '見つかりません');
@@ -370,6 +402,22 @@ async function officeNameMap(env, user) {
 }
 
 async function listRooms(env, req, user, url) {
+  if (user.role === 'cm') return json(env, req, { rooms: await roomsFor(env, user, url) });
+  // 事業所：つながっているケアマネごとに集めて、1つの一覧にする
+  const links = await activeLinks(env, user);
+  const rooms = [], cms = [];
+  for (const l of links) {
+    const ctx = asLinked(user, l);
+    const cmUser = await env.DB.prepare('SELECT display_name FROM users WHERE id = ?').bind(l.cm_id).first();
+    const cm = { id: l.cm_id, name: cmUser ? await open(env, l.cm_id, cmUser.display_name) : '' };
+    cms.push(cm);
+    for (const r of await roomsFor(env, ctx, url)) rooms.push({ ...r, cm });
+  }
+  rooms.sort((a, b) => b.last_at - a.last_at);
+  return json(env, req, { rooms, cms });
+}
+
+async function roomsFor(env, user, url) {
   const officeFilter = url.searchParams.get('office_id');
   const typeFilter = url.searchParams.get('service_type');
   let where = 'c.cm_id = ? AND c.archived = 0';
@@ -416,14 +464,14 @@ async function listRooms(env, req, user, url) {
     });
   }
   rooms.sort((a, b) => b.last_at - a.last_at);
-  return json(env, req, { rooms });
+  return rooms;
 }
 
 async function listMessages(env, req, user, clientId, url) {
   const c = await loadClientForUser(env, user, clientId);
   const after = Number(url.searchParams.get('after') || 0);
   const rows = await env.DB.prepare(
-    `SELECT m.*, u.display_name AS author_name, u.role AS author_role, u.office_id AS author_office
+    `SELECT m.*, u.display_name AS author_name, u.cm_id AS author_cm, u.role AS author_role
        FROM messages m JOIN users u ON u.id = m.author_id
       WHERE m.cm_id = ? AND m.client_id = ? AND m.id > ?
       ORDER BY m.id DESC LIMIT 200`
@@ -441,7 +489,13 @@ async function listMessages(env, req, user, clientId, url) {
   const readRows = await env.DB.prepare('SELECT last_read_id FROM room_reads WHERE client_id = ? AND user_id != ?').bind(clientId, user.id).all();
   const reads = readRows.results.map((r) => r.last_read_id);
 
-  const offices = list.some((m) => m.author_office) ? await officeNameMap(env, user) : new Map();
+  // 事業所の投稿者は「このケアマネが登録している事業所名」で表示する
+  const authorOffice = new Map();
+  if (list.some((m) => m.author_role === 'provider')) {
+    const offices = await officeNameMap(env, user);
+    const lr = await env.DB.prepare('SELECT user_id, office_id FROM provider_links WHERE cm_id = ?').bind(user.cm_id).all();
+    for (const l of lr.results) authorOffice.set(l.user_id, offices.get(l.office_id)?.name || '');
+  }
   const files = new Map();
   if (list.length) {
     const fr = await env.DB.prepare('SELECT id, message_id, filename, mime, size FROM attachments WHERE cm_id = ? AND client_id = ? AND message_id >= ? AND message_id <= ?')
@@ -456,9 +510,9 @@ async function listMessages(env, req, user, clientId, url) {
       body: await open(env, user.cm_id, m.body),
       created_at: m.created_at,
       mine,
-      author: await open(env, user.cm_id, m.author_name),
+      author: await open(env, m.author_cm ?? user.cm_id, m.author_name),
       author_role: m.author_role,
-      author_office: m.author_office ? offices.get(m.author_office)?.name || '' : '',
+      author_office: m.author_role === 'provider' ? authorOffice.get(m.author_id) || '' : '',
       read_count: mine ? reads.filter((x) => x >= m.id).length : null,
       file: files.get(m.id) || null,
     });
@@ -572,6 +626,11 @@ async function uploadAttachment(env, req, user, clientId) {
 }
 
 async function getAttachment(env, req, user, fileId) {
+  if (user.role === 'provider') {
+    const f = await env.DB.prepare('SELECT client_id FROM attachments WHERE id = ?').bind(fileId).first();
+    if (!f) throw new HttpError(404, '見つかりません');
+    user = await ctxForClient(env, user, f.client_id);
+  }
   const a = await env.DB.prepare('SELECT * FROM attachments WHERE id = ? AND cm_id = ?').bind(fileId, user.cm_id).first();
   if (!a) throw new HttpError(404, '見つかりません');
   await loadClientForUser(env, user, a.client_id); // 担当外の事業所には見せない
@@ -631,12 +690,50 @@ async function updateOffice(env, req, user, id) {
   const active = b.active != null ? (b.active ? 1 : 0) : o.active;
   const svc = b.service_type != null ? serviceType(b.service_type) : o.service_type;
   await env.DB.prepare('UPDATE offices SET name = ?, service_type = ?, can_post = ?, active = ? WHERE id = ?').bind(name, svc, canPostV, active, id).run();
-  if (!active) {
-    // 事業所を停止したら、所属アカウントも停止しセッションを破棄
-    await env.DB.prepare('UPDATE users SET active = 0 WHERE office_id = ? AND cm_id = ?').bind(id, user.cm_id).run();
-    await env.DB.prepare('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE office_id = ? AND cm_id = ?)').bind(id, user.cm_id).run();
-  }
+  // 事業所を停止すると、その事業所につないだアカウントからは、このケアマネの利用者が見えなくなる
+  // （アカウント自体は止めない。ほかのケアマネとつながっていることがあるため）
   await audit(env, req, user, 'office_update', `office:${id}`);
+  return json(env, req, { ok: true });
+}
+
+// 事業所を削除：共有先から外し、この事業所につないだアカウントとのつながりも外す（やり取りは残す）
+async function deleteOffice(env, req, user, id) {
+  const o = await env.DB.prepare('SELECT id FROM offices WHERE id = ? AND cm_id = ?').bind(id, user.cm_id).first();
+  if (!o) throw new HttpError(404, '見つかりません');
+  const linked = (await env.DB.prepare('SELECT user_id FROM provider_links WHERE cm_id = ? AND office_id = ?').bind(user.cm_id, id).all()).results.map((r) => r.user_id);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM client_offices WHERE office_id = ? AND client_id IN (SELECT id FROM clients WHERE cm_id = ?)').bind(id, user.cm_id),
+    env.DB.prepare('DELETE FROM provider_links WHERE cm_id = ? AND office_id = ?').bind(user.cm_id, id),
+    env.DB.prepare('DELETE FROM offices WHERE id = ? AND cm_id = ?').bind(id, user.cm_id),
+  ]);
+  // どのケアマネともつながらなくなったアカウントは、ログインできないようにする
+  for (const uid of linked) {
+    const left = await env.DB.prepare('SELECT COUNT(*) AS n FROM provider_links WHERE user_id = ?').bind(uid).first();
+    if (!left.n) {
+      await env.DB.prepare("UPDATE users SET active = 0 WHERE id = ? AND role = 'provider'").bind(uid).run();
+      await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(uid).run();
+    }
+  }
+  await audit(env, req, user, 'office_delete', `office:${id}`);
+  return json(env, req, { ok: true });
+}
+// 利用者を削除：やり取り・添付ファイル・既読の記録もすべて消す（元に戻せない）
+async function deleteClient(env, req, user, id) {
+  const c = await env.DB.prepare('SELECT id FROM clients WHERE id = ? AND cm_id = ?').bind(id, user.cm_id).first();
+  if (!c) throw new HttpError(404, '見つかりません');
+  const files = (await env.DB.prepare("SELECT id, storage FROM attachments WHERE cm_id = ? AND client_id = ?").bind(user.cm_id, id).all()).results;
+  if (env.FILES) {
+    for (const f of files) if (f.storage === 'r2') { try { await env.FILES.delete(`cm${user.cm_id}/${f.id}`); } catch { /* 残っても読めない（鍵で暗号化済み） */ } }
+  }
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM attachment_chunks WHERE attachment_id IN (SELECT id FROM attachments WHERE cm_id = ? AND client_id = ?)').bind(user.cm_id, id),
+    env.DB.prepare('DELETE FROM attachments WHERE cm_id = ? AND client_id = ?').bind(user.cm_id, id),
+    env.DB.prepare('DELETE FROM messages WHERE cm_id = ? AND client_id = ?').bind(user.cm_id, id),
+    env.DB.prepare('DELETE FROM room_reads WHERE client_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM client_offices WHERE client_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM clients WHERE id = ? AND cm_id = ?').bind(id, user.cm_id),
+  ]);
+  await audit(env, req, user, 'client_delete', `client:${id}`);
   return json(env, req, { ok: true });
 }
 
@@ -697,22 +794,38 @@ async function updateClient(env, req, user, id) {
   return json(env, req, { ok: true });
 }
 
+// 事業所アカウント：1つのIDを複数のケアマネで共有できる。
+// ・最初に発行したケアマネ（users.cm_id）が「発行元」。パスワード再発行は、発行元だけ・ほかのケアマネとつながっていないときだけ。
+// ・ほかのケアマネは「発行済みのIDとつなぐ」で依頼し、事業所が承認するとつながる。
 async function listAccounts(env, req, user) {
-  const rows = await env.DB.prepare("SELECT * FROM users WHERE cm_id = ? AND role = 'provider' ORDER BY id").bind(user.cm_id).all();
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.login_id, u.display_name, u.cm_id AS home_cm, u.active AS u_active, u.locked_until,
+            l.office_id, l.status, l.active AS l_active,
+            (SELECT COUNT(*) FROM provider_links x WHERE x.user_id = u.id AND x.cm_id != l.cm_id AND x.status = 'active') AS others
+       FROM provider_links l JOIN users u ON u.id = l.user_id
+      WHERE l.cm_id = ? AND u.role = 'provider' ORDER BY l.created_at, u.id`
+  ).bind(user.cm_id).all();
   const accounts = [];
   for (const u of rows.results) {
     const last = await env.DB.prepare("SELECT at FROM audit_logs WHERE user_id = ? AND action = 'login_success' ORDER BY id DESC LIMIT 1").bind(u.id).first();
     accounts.push({
       id: u.id,
       login_id: u.login_id,
-      name: await open(env, user.cm_id, u.display_name),
+      name: await open(env, u.home_cm, u.display_name),
       office_id: u.office_id,
-      active: !!u.active,
+      status: u.status,
+      active: !!(u.l_active && u.u_active),
       locked: u.locked_until > now(),
+      home: u.home_cm === user.cm_id,
+      shared: u.others > 0,
       last_login: last?.at ?? null,
     });
   }
   return json(env, req, { accounts });
+}
+async function myActiveOffice(env, user, officeId) {
+  const o = await env.DB.prepare('SELECT id FROM offices WHERE id = ? AND cm_id = ? AND active = 1').bind(officeId, user.cm_id).first();
+  if (!o) throw new HttpError(400, '事業所の指定が不正です');
 }
 async function createAccount(env, req, user) {
   const b = await readJson(req);
@@ -720,39 +833,111 @@ async function createAccount(env, req, user) {
   if (!/^[A-Za-z0-9._-]{4,64}$/.test(loginId)) throw new HttpError(400, 'ログインIDは、半角の英字・数字で4文字以上にしてください（例：1234）');
   const name = str(b.name, 50, '担当者名');
   const officeId = intId(b.office_id);
-  const o = await env.DB.prepare('SELECT id FROM offices WHERE id = ? AND cm_id = ? AND active = 1').bind(officeId, user.cm_id).first();
-  if (!o) throw new HttpError(400, '事業所の指定が不正です');
+  await myActiveOffice(env, user, officeId);
   checkPasswordPolicy(b.password);
-  const exists = await env.DB.prepare('SELECT id FROM users WHERE login_id = ?').bind(loginId).first();
+  const exists = await env.DB.prepare('SELECT id, role FROM users WHERE login_id = ?').bind(loginId).first();
+  if (exists?.role === 'provider') throw new HttpError(409, 'このログインIDは、すでに発行されています。同じ事業所なら「発行済みのIDとつなぐ」を使ってください');
   if (exists) throw new HttpError(409, 'このログインIDは使われています');
+  const t = now();
   const r = await env.DB.prepare("INSERT INTO users (role, cm_id, office_id, login_id, display_name, password_hash, must_change_pw, created_at) VALUES ('provider',?,?,?,?,?,1,?)")
-    .bind(user.cm_id, officeId, loginId, await seal(env, user.cm_id, name), await hashPassword(b.password), now())
+    .bind(user.cm_id, officeId, loginId, await seal(env, user.cm_id, name), await hashPassword(b.password), t)
     .run();
-  await audit(env, req, user, 'account_create', `user:${r.meta.last_row_id}`);
-  return json(env, req, { ok: true, id: r.meta.last_row_id });
+  const id = r.meta.last_row_id;
+  await env.DB.prepare("INSERT INTO provider_links (user_id, cm_id, office_id, status, active, created_at) VALUES (?,?,?,'active',1,?)").bind(id, user.cm_id, officeId, t).run();
+  await audit(env, req, user, 'account_create', `user:${id}`);
+  return json(env, req, { ok: true, id });
+}
+// 発行済みのID（ほかのケアマネが発行した事業所アカウント）に、つながる依頼を出す
+async function linkAccount(env, req, user) {
+  const b = await readJson(req);
+  const loginId = normId(str(b.login_id, 64, 'ログインID'));
+  const officeId = intId(b.office_id);
+  await myActiveOffice(env, user, officeId);
+  const u = await env.DB.prepare("SELECT id FROM users WHERE login_id = ? AND role = 'provider' AND active = 1").bind(loginId).first();
+  if (!u) throw new HttpError(404, 'このログインIDの事業所アカウントは見つかりません。IDを事業所に確認してください');
+  const ex = await env.DB.prepare('SELECT status FROM provider_links WHERE user_id = ? AND cm_id = ?').bind(u.id, user.cm_id).first();
+  if (ex) throw new HttpError(409, ex.status === 'pending' ? 'すでに依頼しています。事業所の承認を待っています' : 'すでにつながっています');
+  await env.DB.prepare("INSERT INTO provider_links (user_id, cm_id, office_id, status, active, created_at) VALUES (?,?,?,'pending',1,?)").bind(u.id, user.cm_id, officeId, now()).run();
+  await audit(env, req, user, 'account_link_request', `user:${u.id}`);
+  return json(env, req, { ok: true, id: u.id });
 }
 async function updateAccount(env, req, user, id) {
-  const u = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND cm_id = ? AND role = 'provider'").bind(id, user.cm_id).first();
+  const u = await env.DB.prepare(
+    `SELECT u.*, l.status, l.active AS l_active,
+            (SELECT COUNT(*) FROM provider_links x WHERE x.user_id = u.id AND x.cm_id != l.cm_id AND x.status = 'active') AS others
+       FROM provider_links l JOIN users u ON u.id = l.user_id WHERE l.user_id = ? AND l.cm_id = ? AND u.role = 'provider'`
+  ).bind(id, user.cm_id).first();
   if (!u) throw new HttpError(404, '見つかりません');
+  const home = u.cm_id === user.cm_id;
   const b = await readJson(req);
+  if (b.remove) {
+    // つながりを外す（依頼の取り消しも同じ）。発行元はアカウントごと停止で対応する
+    if (home) throw new HttpError(400, 'このケアマネが発行したアカウントです。使わなくなったら「停止」してください');
+    await env.DB.prepare('DELETE FROM provider_links WHERE user_id = ? AND cm_id = ?').bind(id, user.cm_id).run();
+    await audit(env, req, user, 'account_unlink', `user:${id}`);
+    return json(env, req, { ok: true });
+  }
   if (b.password != null) {
+    if (!home) throw new HttpError(403, 'パスワードの再発行は、このアカウントを発行したケアマネジャーだけができます');
+    if (u.others > 0) throw new HttpError(403, 'ほかのケアマネジャーともつながっているため、ここでは再発行できません。事業所の方ご自身で「パスワード変更」をしてもらってください');
     checkPasswordPolicy(b.password);
     await env.DB.prepare('UPDATE users SET password_hash = ?, must_change_pw = 1, failed_count = 0, locked_until = 0 WHERE id = ?').bind(await hashPassword(b.password), id).run();
     await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run();
     await audit(env, req, user, 'account_reset_pw', `user:${id}`);
   }
   if (b.active != null) {
-    await env.DB.prepare('UPDATE users SET active = ? WHERE id = ?').bind(b.active ? 1 : 0, id).run();
-    if (!b.active) await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run();
-    await audit(env, req, user, b.active ? 'account_enable' : 'account_disable', `user:${id}`);
+    const on = b.active ? 1 : 0;
+    await env.DB.prepare('UPDATE provider_links SET active = ? WHERE user_id = ? AND cm_id = ?').bind(on, id, user.cm_id).run();
+    // 発行元で、ほかのケアマネとつながっていなければ、ログインそのものも止める／戻す
+    if (home && !u.others) {
+      await env.DB.prepare('UPDATE users SET active = ? WHERE id = ?').bind(on, id).run();
+      if (!on) await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run();
+    }
+    await audit(env, req, user, on ? 'account_enable' : 'account_disable', `user:${id}`);
   }
+  return json(env, req, { ok: true });
+}
+
+// 事業所の側：つながっているケアマネの一覧・依頼の承認・つながりを外す
+async function listLinks(env, req, user) {
+  const rows = await env.DB.prepare(
+    `SELECT l.cm_id, l.office_id, l.status, l.active, l.created_at, u.display_name, o.name AS office_name, o.can_post, o.active AS o_active
+       FROM provider_links l JOIN users u ON u.id = l.cm_id LEFT JOIN offices o ON o.id = l.office_id AND o.cm_id = l.cm_id
+      WHERE l.user_id = ? ORDER BY l.status DESC, l.created_at`
+  ).bind(user.id).all();
+  const links = [];
+  for (const l of rows.results) {
+    links.push({
+      cm_id: l.cm_id,
+      cm_name: await open(env, l.cm_id, l.display_name),
+      office_name: l.office_name ? await open(env, l.cm_id, l.office_name) : '',
+      status: l.status,
+      active: !!(l.active && l.o_active),
+      can_post: !!l.can_post,
+      home: l.cm_id === user.cm_id,
+      created_at: l.created_at,
+    });
+  }
+  return json(env, req, { links });
+}
+async function answerLink(env, req, user, cmId, accept) {
+  const l = await env.DB.prepare('SELECT status FROM provider_links WHERE user_id = ? AND cm_id = ?').bind(user.id, cmId).first();
+  if (!l) throw new HttpError(404, '見つかりません');
+  if (accept) {
+    if (l.status !== 'pending') return json(env, req, { ok: true });
+    await env.DB.prepare("UPDATE provider_links SET status = 'active' WHERE user_id = ? AND cm_id = ?").bind(user.id, cmId).run();
+  } else {
+    await env.DB.prepare('DELETE FROM provider_links WHERE user_id = ? AND cm_id = ?').bind(user.id, cmId).run();
+  }
+  // 記録は、相手のケアマネの「操作の記録」に残す
+  await audit(env, req, user, accept ? 'link_accept' : (l.status === 'pending' ? 'link_reject' : 'link_remove'), `user:${user.id}`, cmId);
   return json(env, req, { ok: true });
 }
 
 async function listAudit(env, req, user, url) {
   const before = Number(url.searchParams.get('before') || 0) || Number.MAX_SAFE_INTEGER;
   const rows = await env.DB.prepare(
-    'SELECT a.*, u.login_id, u.display_name FROM audit_logs a LEFT JOIN users u ON u.id = a.user_id WHERE a.cm_id = ? AND a.id < ? ORDER BY a.id DESC LIMIT 100'
+    'SELECT a.*, u.login_id, u.display_name, u.cm_id AS user_cm FROM audit_logs a LEFT JOIN users u ON u.id = a.user_id WHERE a.cm_id = ? AND a.id < ? ORDER BY a.id DESC LIMIT 100'
   ).bind(user.cm_id, before).all();
   const logs = [];
   for (const l of rows.results) {
@@ -763,7 +948,7 @@ async function listAudit(env, req, user, url) {
       target: l.target,
       ip: l.ip,
       login_id: l.login_id,
-      name: l.display_name ? await open(env, user.cm_id, l.display_name) : '',
+      name: l.display_name ? await open(env, l.user_cm ?? user.cm_id, l.display_name) : '',
     });
   }
   return json(env, req, { logs });
@@ -805,9 +990,17 @@ const OPENDATA_FALLBACK = {
   780: 'jigyosho_780_all_20260709180927.csv',
 };
 let migrated = false;
-async function ensureDirectory(env) {
+// 新しく増えた表は、ここで自動的に作る（D1 のコンソールで SQL を流し直さなくてよいように）
+async function ensureSchema(env) {
   if (migrated) return;
   await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS provider_links (user_id INTEGER NOT NULL, cm_id INTEGER NOT NULL, office_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, PRIMARY KEY (user_id, cm_id))"),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_provider_links_cm ON provider_links(cm_id)'),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS app_meta (k TEXT PRIMARY KEY, v TEXT)'),
+    // 以前のしくみ（1アカウント＝1ケアマネ）で発行したアカウントを、1回だけ provider_links に移す
+    env.DB.prepare("INSERT OR IGNORE INTO provider_links (user_id, cm_id, office_id, status, active, created_at) SELECT id, cm_id, office_id, 'active', 1, created_at FROM users WHERE role = 'provider' AND cm_id IS NOT NULL AND office_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM app_meta WHERE k = 'links_v1')"),
+    env.DB.prepare("INSERT OR IGNORE INTO app_meta (k, v) VALUES ('links_v1', '1')"),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS user_prefs (user_id INTEGER PRIMARY KEY, font_size TEXT)'),
     env.DB.prepare('CREATE TABLE IF NOT EXISTS directory (id INTEGER PRIMARY KEY AUTOINCREMENT, pref TEXT NOT NULL, service_type TEXT NOT NULL, code TEXT NOT NULL, city TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT \'\', tel TEXT NOT NULL DEFAULT \'\', office_no TEXT NOT NULL DEFAULT \'\')'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_directory ON directory(pref, service_type, city)'),
     env.DB.prepare('CREATE TABLE IF NOT EXISTS directory_meta (pref TEXT NOT NULL, code TEXT NOT NULL, service_type TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, source TEXT, imported_at INTEGER NOT NULL, PRIMARY KEY (pref, code))'),
@@ -979,9 +1172,10 @@ async function route(env, req) {
 
   if (m === 'GET' && (p === '' || p === '/api/health')) return json(env, req, await healthCheck(env));
   if (m === 'GET' && p === '/api/service-types') return json(env, req, { service_types: SERVICE_TYPES });
-  if (m === 'POST' && p === '/api/login') return handleLogin(env, req);
+  if (m === 'POST' && p === '/api/login') { await ensureSchema(env); return handleLogin(env, req); }
   if (m === 'POST' && p === '/api/setup') return handleSetup(env, req);
 
+  await ensureSchema(env);
   const user = await authenticate(env, req);
 
   if (m === 'GET' && p === '/api/me') return json(env, req, { user: await publicUser(env, user) });
@@ -991,21 +1185,34 @@ async function route(env, req) {
     return json(env, req, { ok: true });
   }
   if (m === 'POST' && p === '/api/password') return changePassword(env, req, user);
+  if (m === 'POST' && p === '/api/me/prefs') {
+    const b = await readJson(req);
+    if (!['normal', 'large', 'xlarge'].includes(b.font_size)) throw new HttpError(400, '文字の大きさが不正です');
+    await env.DB.prepare('INSERT INTO user_prefs (user_id, font_size) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET font_size = excluded.font_size').bind(user.id, b.font_size).run();
+    return json(env, req, { ok: true });
+  }
 
   requirePwChanged(user);
 
   if (m === 'GET' && p === '/api/rooms') return listRooms(env, req, user, url);
   let mm;
   if ((mm = p.match(/^\/api\/rooms\/(\d+)\/messages$/))) {
-    if (m === 'GET') return listMessages(env, req, user, intId(mm[1]), url);
-    if (m === 'POST') return postMessage(env, req, user, intId(mm[1]));
+    const id = intId(mm[1]);
+    if (m === 'GET') return listMessages(env, req, await ctxForClient(env, user, id), id, url);
+    if (m === 'POST') return postMessage(env, req, await ctxForClient(env, user, id), id);
   }
-  if ((mm = p.match(/^\/api\/rooms\/(\d+)\/attachments$/)) && m === 'POST') return uploadAttachment(env, req, user, intId(mm[1]));
+  if ((mm = p.match(/^\/api\/rooms\/(\d+)\/attachments$/)) && m === 'POST') {
+    const id = intId(mm[1]);
+    return uploadAttachment(env, req, await ctxForClient(env, user, id), id);
+  }
   if ((mm = p.match(/^\/api\/attachments\/(\d+)$/)) && m === 'GET') return getAttachment(env, req, user, intId(mm[1]));
 
+  if (user.role === 'provider') {
+    if (m === 'GET' && p === '/api/links') return listLinks(env, req, user);
+    if ((mm = p.match(/^\/api\/links\/(\d+)\/(accept|remove)$/)) && m === 'POST') return answerLink(env, req, user, intId(mm[1]), mm[2] === 'accept');
+  }
   requireCm(user);
-  await ensureDirectory(env);
-  if (m === 'GET' && p === '/api/directory/status') return directoryStatus(env, req, url);
+    if (m === 'GET' && p === '/api/directory/status') return directoryStatus(env, req, url);
   if (m === 'GET' && p === '/api/directory/cities') return directoryCities(env, req, url);
   if (m === 'GET' && p === '/api/directory/list') return directoryList(env, req, url);
   if (m === 'GET' && p === '/api/directory/source') return directorySource(env, req, url);
@@ -1015,6 +1222,8 @@ async function route(env, req) {
     if (m === 'POST') return createOffice(env, req, user);
   }
   if ((mm = p.match(/^\/api\/offices\/(\d+)$/)) && m === 'PATCH') return updateOffice(env, req, user, intId(mm[1]));
+  if ((mm = p.match(/^\/api\/offices\/(\d+)\/delete$/)) && m === 'POST') return deleteOffice(env, req, user, intId(mm[1]));
+  if ((mm = p.match(/^\/api\/clients\/(\d+)\/delete$/)) && m === 'POST') return deleteClient(env, req, user, intId(mm[1]));
   if (p === '/api/clients') {
     if (m === 'GET') return listClients(env, req, user);
     if (m === 'POST') return createClient(env, req, user);
@@ -1024,6 +1233,7 @@ async function route(env, req) {
     if (m === 'GET') return listAccounts(env, req, user);
     if (m === 'POST') return createAccount(env, req, user);
   }
+  if (m === 'POST' && p === '/api/accounts/link') return linkAccount(env, req, user);
   if ((mm = p.match(/^\/api\/accounts\/(\d+)$/)) && m === 'PATCH') return updateAccount(env, req, user, intId(mm[1]));
   if (m === 'GET' && p === '/api/audit') return listAudit(env, req, user, url);
 
