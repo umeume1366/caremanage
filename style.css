@@ -322,6 +322,7 @@ table.csv tbody tr:nth-child(even) { background: #fbf8f1; }
 .menu button:hover { background: var(--brand-soft); }
 .menu button .hint { display: block; font-weight: 400; margin-left: 1.9rem; }
 .menu .badge { margin-left: .4rem; }
+.menu button > .tag { margin-left: .5rem; }
 .menufold { margin-top: 1.2rem; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .menufold summary { list-style: none; cursor: pointer; padding: .9rem 1rem; font-weight: 700; color: var(--sub); min-height: 3rem; display: flex; align-items: center; justify-content: space-between; }
 .menufold summary::-webkit-details-marker { display: none; }

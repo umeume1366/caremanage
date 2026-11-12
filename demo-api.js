@@ -353,6 +353,14 @@
       if (!b.next || b.next.length < 10) return err(400, 'パスワードは10文字以上にしてください');
       u.pw = b.next; u.must = false; log(u, 'password_change'); return ok({ ok: true });
     }
+    if (path === '/api/unread') {
+      let rooms = 0, unread = 0, latest = 0;
+      db.clients.filter((c) => visible(u, c)).forEach((c) => {
+        const un = db.messages.filter((m) => m.client_id === c.id && m.author_id !== u.id && !db.reads.has(`${u.id}:${m.id}`));
+        if (un.length) { rooms++; unread += un.length; latest = Math.max(latest, ...un.map((m) => m.id)); }
+      });
+      return ok({ rooms, unread, latest });
+    }
     if (path === '/api/rooms') {
       const of = Number(q.get('office_id') || 0);
       const st = q.get('service_type');

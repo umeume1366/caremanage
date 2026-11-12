@@ -71,3 +71,13 @@ self.addEventListener('fetch', (e) => {
     }
   })());
 });
+
+// 通知を押したら、開いているケアブルの画面を前に出す（なければ新しく開く）
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of list) { if ('focus' in c) return c.focus(); }
+    if (self.clients.openWindow) return self.clients.openWindow('./');
+  })());
+});
