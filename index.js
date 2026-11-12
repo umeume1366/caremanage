@@ -6,7 +6,7 @@
 // - 事業所アカウントは1つのIDで複数のケアマネとつながれる（provider_links）。ケアマネごとに承認・停止できる
 // - 監査ログ: ログイン、閲覧、投稿、設定変更を記録
 
-const VERSION = '2026-11-11g';
+const VERSION = '2026-11-12a';
 let lastError = null; // 直近のサーバーエラー（/api/health で確認できる。個人情報は含めない）
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -215,7 +215,7 @@ async function audit(env, req, user, action, target = null, cmId = null) {
 }
 
 // ---------- 認証 ----------
-async function authenticate(env, req) {
+async function authenticate(env, req, { touch = true } = {}) {
   const auth = req.headers.get('Authorization') || '';
   const m = auth.match(/^Bearer ([A-Za-z0-9_-]{20,})$/);
   if (!m) throw new HttpError(401, 'ログインしてください');
@@ -229,7 +229,7 @@ async function authenticate(env, req) {
   const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(s.user_id).first();
   if (!user || !user.active) throw new HttpError(401, 'アカウントが無効です');
   await repairCm(env, user);
-  if (t - s.last_seen > 5 * 60 * 1000) {
+  if (touch && t - s.last_seen > 5 * 60 * 1000) {
     await env.DB.prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?').bind(t, th).run();
   }
   user.token_hash = th;
@@ -411,6 +411,30 @@ async function officeNameMap(env, user) {
   const map = new Map();
   for (const o of rows.results) map.set(o.id, { id: o.id, name: await open(env, user.cm_id, o.name), service_type: o.service_type, active: !!o.active });
   return map;
+}
+
+// 未読の数だけを返す軽い窓口（タブの題名「(3) ケアブル」と、パソコンの通知に使う）
+// ・読むのは「まだ読んでいない連絡がある利用者」の分だけ。書き込みはしない。操作記録にも残さない
+// ・数え方は一覧の未読バッジと同じ（自分以外の人の投稿で、まだ読んでいないもの。1人の利用者につき最大100）
+async function unreadSummary(env, req, user) {
+  const ctxs = user.role === 'cm' ? [user] : (await activeLinks(env, user)).slice(0, 40).map((l) => asLinked(user, l));
+  let rooms = 0, unread = 0, latest = 0;
+  for (const c of ctxs) {
+    const provider = c.role === 'provider';
+    const args = [user.id, user.id, c.cm_id];
+    if (provider) args.push(c.office_id);
+    const r = await env.DB.prepare(
+      `SELECT COUNT(CASE WHEN n > 0 THEN 1 END) AS rooms, IFNULL(SUM(n), 0) AS msgs, IFNULL(MAX(CASE WHEN n > 0 THEN last_msg_id END), 0) AS latest
+         FROM (SELECT c.last_msg_id,
+                      (SELECT COUNT(*) FROM (SELECT 1 FROM messages m
+                         WHERE m.cm_id = c.cm_id AND m.client_id = c.id AND m.id > IFNULL(r.last_read_id, 0) AND m.author_id != ? LIMIT 100)) AS n
+                 FROM clients c LEFT JOIN room_reads r ON r.user_id = ? AND r.client_id = c.id
+                WHERE c.cm_id = ? AND c.archived = 0 AND c.last_msg_id > IFNULL(r.last_read_id, 0)
+                  ${provider ? 'AND EXISTS (SELECT 1 FROM client_offices co WHERE co.client_id = c.id AND co.office_id = ?)' : ''})`
+    ).bind(...args).first();
+    rooms += r.rooms; unread += r.msgs; latest = Math.max(latest, r.latest);
+  }
+  return json(env, req, { rooms, unread, latest });
 }
 
 async function listRooms(env, req, user, url) {
@@ -1199,7 +1223,9 @@ async function route(env, req) {
   if (m === 'POST' && p === '/api/setup') return handleSetup(env, req);
 
   await ensureSchema(env);
-  const user = await authenticate(env, req);
+  // 未読の数の確認は、画面を開いているだけで自動的に届く通信。これで「操作があった」とは見なさない
+  // （30分操作がなければログアウト、という決まりを保つため）
+  const user = await authenticate(env, req, { touch: !(m === 'GET' && p === '/api/unread') });
 
   if (m === 'GET' && p === '/api/me') return json(env, req, { user: await publicUser(env, user) });
   if (m === 'POST' && p === '/api/logout') {
@@ -1224,6 +1250,7 @@ async function route(env, req) {
 
   requirePwChanged(user);
 
+  if (m === 'GET' && p === '/api/unread') return unreadSummary(env, req, user);
   if (m === 'GET' && p === '/api/rooms') return listRooms(env, req, user, url);
   let mm;
   if ((mm = p.match(/^\/api\/rooms\/(\d+)\/messages$/))) {
