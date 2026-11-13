@@ -6,7 +6,7 @@
 // - 事業所アカウントは1つのIDで複数のケアマネとつながれる（provider_links）。ケアマネごとに承認・停止できる
 // - 監査ログ: ログイン、閲覧、投稿、設定変更を記録
 
-const VERSION = '2026-11-12a';
+const VERSION = '2026-11-13a';
 let lastError = null; // 直近のサーバーエラー（/api/health で確認できる。個人情報は含めない）
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -55,6 +55,10 @@ function fromB64(s) {
 }
 function b64url(buf) {
   return toB64(buf).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function fromB64url(s) {
+  const t = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  return fromB64(t + '==='.slice((t.length + 3) % 4));
 }
 function randomBytes(n) {
   return crypto.getRandomValues(new Uint8Array(n));
@@ -157,7 +161,7 @@ function corsHeaders(env, req) {
   const allowed = (env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
   const h = {
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-File-Name, X-Caption',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-File-Name, X-Caption, X-Careble-Passive',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };
@@ -434,10 +438,12 @@ async function unreadSummary(env, req, user) {
     ).bind(...args).first();
     rooms += r.rooms; unread += r.msgs; latest = Math.max(latest, r.latest);
   }
+  await markChecked(env, user);
   return json(env, req, { rooms, unread, latest });
 }
 
 async function listRooms(env, req, user, url) {
+  await markChecked(env, user);
   if (user.role === 'cm') return json(env, req, { rooms: await roomsFor(env, user, url) });
   // 事業所：つながっているケアマネごとに集めて、1つの一覧にする
   const links = await activeLinks(env, user);
@@ -505,6 +511,7 @@ async function roomsFor(env, user, url) {
 
 async function listMessages(env, req, user, clientId, url) {
   const c = await loadClientForUser(env, user, clientId);
+  await markChecked(env, user);
   const after = Number(url.searchParams.get('after') || 0);
   const rows = await env.DB.prepare(
     `SELECT m.*, u.display_name AS author_name, u.cm_id AS author_cm, u.role AS author_role
@@ -575,7 +582,143 @@ async function postMessage(env, req, user, clientId) {
     ).bind(user.id, clientId, id, t),
   ]);
   await audit(env, req, user, 'message_post', `client:${clientId} msg:${id}`);
+  await later(env, signalNew(env, req, user, clientId));
   return json(env, req, { ok: true, id });
+}
+
+// ---------- 新しい連絡の「合図」（Web Push） ----------
+// 考え方：画面がサーバーに「新しい連絡はある？」と聞きに行くのをやめる。
+//         連絡が書かれた瞬間だけ、サーバーから相手の端末へ「合図」を1回送る。
+// ・合図は、ブラウザの会社の配達所（Chrome＝Google、Edge＝Microsoft、Firefox＝Mozilla、Safari＝Apple）経由で届く。
+//   待ち受けはブラウザ自身が行うので、ケアブルのサーバーには「待ち受けのための通信」が一切かからない
+// ・合図は空っぽ（中身なし）。利用者の名前も本文も、配達所には一切渡らない
+// ・合図はまとめる：前の合図のあと本人がまだ確認していなければ、30分は次の合図を送らない
+//   （連絡が10件続いても、気づくための通知は1回。確認したら、次の連絡でまた知らせる）
+const PUSH_HOSTS = [/^fcm\.googleapis\.com$/, /^android\.googleapis\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /(^|\.)push\.apple\.com$/, /\.notify\.windows\.com$/];
+const PUSH_QUIET = 30 * 60 * 1000;
+const PUSH_MAX_DEVICES = 10;
+let vapid = null;
+const vapidJwt = new Map();
+
+// 合図に付ける「ケアブルからの合図です」という署名の鍵。最初に必要になったとき自動で作り、DATA_KEY で暗号化して保存する
+async function vapidKeys(env) {
+  if (vapid) return vapid;
+  const read = () => env.DB.prepare("SELECT v FROM app_meta WHERE k = 'vapid_v1'").first();
+  let row = await read();
+  let jwk = null;
+  if (row) {
+    try { jwk = JSON.parse(await open(env, 'vapid', row.v)); } catch { jwk = null; }
+    if (!jwk || !jwk.d) {
+      // DATA_KEY を変えたなどで読めないときは作り直す（古い鍵で登録した端末は使えないので、登録も消す）
+      await env.DB.batch([env.DB.prepare("DELETE FROM app_meta WHERE k = 'vapid_v1'"), env.DB.prepare('DELETE FROM push_subs')]);
+      row = null;
+    }
+  }
+  if (!row) {
+    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const made = await crypto.subtle.exportKey('jwk', kp.privateKey);
+    await env.DB.prepare("INSERT OR IGNORE INTO app_meta (k, v) VALUES ('vapid_v1', ?)").bind(await seal(env, 'vapid', JSON.stringify(made))).run();
+    jwk = JSON.parse(await open(env, 'vapid', (await read()).v)); // 同時に作られたときは、先に保存された方を使う
+  }
+  const priv = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const raw = new Uint8Array(65);
+  raw[0] = 4; raw.set(fromB64url(jwk.x), 1); raw.set(fromB64url(jwk.y), 33);
+  vapid = { priv, pub: b64url(raw) };
+  return vapid;
+}
+function vapidSubject(env, req) {
+  if (env.VAPID_SUBJECT) return env.VAPID_SUBJECT;
+  const o = String(env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).find((s) => /^https:\/\//.test(s));
+  return o || new URL(req.url).origin;
+}
+async function vapidHeader(env, req, endpoint) {
+  const aud = new URL(endpoint).origin;
+  const hit = vapidJwt.get(aud);
+  if (hit && hit.exp - Date.now() > 60 * 60 * 1000) return hit.v;
+  const k = await vapidKeys(env);
+  const exp = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
+  const head = b64url(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const body = b64url(enc.encode(JSON.stringify({ aud, exp, sub: vapidSubject(env, req) })));
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, k.priv, enc.encode(`${head}.${body}`));
+  const v = `vapid t=${head}.${body}.${b64url(sig)}, k=${k.pub}`;
+  vapidJwt.set(aud, { v, exp: exp * 1000 });
+  return v;
+}
+// 登録先は、ブラウザの会社の配達所だけを受け付ける（ほかの場所へサーバーから通信させないため）
+function pushEndpoint(v) {
+  const s = String(v || '');
+  let u;
+  try { u = new URL(s); } catch { throw new HttpError(400, '通知の登録先が正しくありません'); }
+  if (u.protocol !== 'https:' || s.length > 1000 || u.username || u.password || u.port || !PUSH_HOSTS.some((r) => r.test(u.hostname))) {
+    throw new HttpError(400, 'このブラウザの通知には対応していません');
+  }
+  return u.href;
+}
+async function pushSubscribe(env, req, user) {
+  const ep = pushEndpoint((await readJson(req)).endpoint);
+  await vapidKeys(env);
+  const id = await sha256Hex(ep);
+  await env.DB.batch([
+    // 同じパソコンで別の人がログインし直したときは、そのパソコンへの合図を新しい人に付け替える
+    env.DB.prepare('INSERT INTO push_subs (id, user_id, endpoint, created_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, created_at = excluded.created_at').bind(id, user.id, ep, now()),
+    env.DB.prepare(`DELETE FROM push_subs WHERE user_id = ? AND id NOT IN (SELECT id FROM push_subs WHERE user_id = ? ORDER BY created_at DESC LIMIT ${PUSH_MAX_DEVICES})`).bind(user.id, user.id),
+  ]);
+  await audit(env, req, user, 'push_on');
+  return json(env, req, { ok: true });
+}
+async function pushUnsubscribe(env, req, user) {
+  const ep = String((await readJson(req)).endpoint || '');
+  if (ep) await env.DB.prepare('DELETE FROM push_subs WHERE id = ? AND user_id = ?').bind(await sha256Hex(ep), user.id).run();
+  return json(env, req, { ok: true });
+}
+// 本人が一覧・トークを開いた＝確認した。次の連絡でまた合図を送れるようにする（合図を送ったあとのときだけ書き込む）
+async function markChecked(env, user) {
+  if (user.unseen) return; // 画面が裏にあるときの自動の取り直しは「確認した」に数えない
+  await env.DB.prepare('UPDATE push_state SET checked_at = ? WHERE user_id = ? AND checked_at < notified_at').bind(now(), user.id).run();
+}
+// 返事を待たずに裏で続ける（投稿した人の画面を遅くしない）
+function later(env, p) {
+  const job = p.catch((e) => console.error('push', e));
+  if (env.CTX && env.CTX.waitUntil) { env.CTX.waitUntil(job); return null; }
+  return job;
+}
+// 連絡が書かれたときに、その利用者のトークに入れる人（書いた本人を除く）へ合図を送る
+async function signalNew(env, req, user, clientId) {
+  const t = now();
+  const subs = (await env.DB.prepare(
+    `SELECT s.id, s.user_id, s.endpoint FROM push_subs s
+       JOIN users u ON u.id = s.user_id AND u.active = 1
+       LEFT JOIN push_state ps ON ps.user_id = s.user_id
+      WHERE s.user_id != ?
+        AND (ps.user_id IS NULL OR ps.checked_at >= ps.notified_at OR ps.notified_at < ?)
+        AND EXISTS (SELECT 1 FROM clients c WHERE c.id = ? AND c.cm_id = ? AND c.archived = 0)
+        AND ((u.role = 'cm' AND u.id = ?)
+          OR EXISTS (SELECT 1 FROM provider_links l
+                       JOIN client_offices co ON co.office_id = l.office_id AND co.client_id = ?
+                       JOIN offices o ON o.id = l.office_id AND o.cm_id = l.cm_id AND o.active = 1
+                      WHERE l.user_id = s.user_id AND l.cm_id = ? AND l.status = 'active' AND l.active = 1))
+      LIMIT 60`
+  ).bind(user.id, t - PUSH_QUIET, clientId, user.cm_id, user.cm_id, clientId, user.cm_id).all()).results;
+  if (!subs.length) return { sent: 0 };
+  const uids = [...new Set(subs.map((s) => s.user_id))];
+  await env.DB.batch(uids.map((u) => env.DB.prepare(
+    'INSERT INTO push_state (user_id, notified_at, checked_at) VALUES (?,?,0) ON CONFLICT(user_id) DO UPDATE SET notified_at = excluded.notified_at'
+  ).bind(u, t)));
+  const gone = [];
+  let sent = 0;
+  await Promise.all(subs.map(async (s) => {
+    try {
+      const r = await fetch(s.endpoint, {
+        method: 'POST',
+        headers: { Authorization: await vapidHeader(env, req, s.endpoint), TTL: '86400', Urgency: 'high', Topic: 'careble-new', 'Content-Length': '0' },
+      });
+      if (r.status === 404 || r.status === 410) gone.push(s.id); // その端末で通知が解除された
+      else if (r.ok) sent++;
+      else console.warn('push', r.status, new URL(s.endpoint).hostname);
+    } catch (e) { console.warn('push', String(e && e.message || e)); }
+  }));
+  if (gone.length) await env.DB.prepare(`DELETE FROM push_subs WHERE id IN (${gone.map(() => '?').join(',')})`).bind(...gone).run();
+  return { sent, gone: gone.length };
 }
 
 // ---------- 添付ファイル（写真・PDF・CSV） ----------
@@ -658,6 +801,7 @@ async function uploadAttachment(env, req, user, clientId) {
     ).bind(user.id, clientId, messageId, t),
   ]);
   await audit(env, req, user, 'file_upload', `client:${clientId} file:${fileId}`);
+  await later(env, signalNew(env, req, user, clientId));
   return json(env, req, { ok: true, id: messageId, attachment_id: fileId });
 }
 
@@ -1040,6 +1184,10 @@ async function ensureSchema(env) {
     env.DB.prepare('CREATE TABLE IF NOT EXISTS directory (id INTEGER PRIMARY KEY AUTOINCREMENT, pref TEXT NOT NULL, service_type TEXT NOT NULL, code TEXT NOT NULL, city TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT \'\', tel TEXT NOT NULL DEFAULT \'\', office_no TEXT NOT NULL DEFAULT \'\')'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_directory ON directory(pref, service_type, city)'),
     env.DB.prepare('CREATE TABLE IF NOT EXISTS directory_meta (pref TEXT NOT NULL, code TEXT NOT NULL, service_type TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, source TEXT, imported_at INTEGER NOT NULL, PRIMARY KEY (pref, code))'),
+    // 新しい連絡の合図（Web Push）：送り先（端末ごと）と、「合図を送った／本人が確認した」時刻（人ごと）
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, endpoint TEXT NOT NULL, created_at INTEGER NOT NULL)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subs(user_id)'),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS push_state (user_id INTEGER PRIMARY KEY, notified_at INTEGER NOT NULL DEFAULT 0, checked_at INTEGER NOT NULL DEFAULT 0)'),
     ...Object.entries(LEGACY_TYPES).map(([a, b]) => env.DB.prepare('UPDATE offices SET service_type = ? WHERE service_type = ?').bind(b, a)),
   ]);
   // 設定の表に「基本の都道府県」の列を足す（1回だけ。済んだら app_meta に印を付けて、次からは何もしない）
@@ -1206,7 +1354,13 @@ async function healthCheck(env) {
     }
   }
   const ok = check.database === 'OK' && check.tables === 'OK' && check.data_key === 'OK' && check.setup_token === 'OK' && check.encryption === 'OK' && check.columns === 'OK';
-  const out = { ok, version: VERSION, app: 'ケアつなぎ API', check };
+  if (check.tables === 'OK') {
+    try {
+      const v = await env.DB.prepare("SELECT 1 AS x FROM app_meta WHERE k = 'vapid_v1'").first();
+      check.push = v ? 'OK' : 'まだ（最初にだれかが通知をオンにしたとき、自動で準備します）';
+    } catch { check.push = 'まだ'; }
+  }
+  const out = { ok, version: VERSION, app: 'ケアブル API', check };
   if (lastError) out.last_error = lastError;
   return out;
 }
@@ -1223,11 +1377,19 @@ async function route(env, req) {
   if (m === 'POST' && p === '/api/setup') return handleSetup(env, req);
 
   await ensureSchema(env);
-  // 未読の数の確認は、画面を開いているだけで自動的に届く通信。これで「操作があった」とは見なさない
-  // （30分操作がなければログアウト、という決まりを保つため）
-  const user = await authenticate(env, req, { touch: !(m === 'GET' && p === '/api/unread') });
+  // 合図を受けて画面が自動で取り直す通信（X-Careble-Passive）は「操作があった」とは見なさない
+  // （人がいないパソコンに連絡が届き続けても、30分でログアウトする決まりを保つため）
+  //   1 = 画面が裏にある（まだ本人は見ていない）  2 = 画面が見えている（本人が見た）
+  const pv = req.headers.get('X-Careble-Passive') || '';
+  const user = await authenticate(env, req, { touch: !(pv === '1' || pv === '2' || (m === 'GET' && p === '/api/unread')) });
+  user.unseen = pv === '1';
 
-  if (m === 'GET' && p === '/api/me') return json(env, req, { user: await publicUser(env, user) });
+  if (m === 'GET' && p === '/api/me') {
+    // 通知の合図に使う公開鍵も一緒に返す（画面がもう1回聞きに来なくて済むように）
+    let pushKey = null;
+    try { pushKey = (await vapidKeys(env)).pub; } catch (e) { console.error('vapid', e); }
+    return json(env, req, { user: await publicUser(env, user), push_key: pushKey });
+  }
   if (m === 'POST' && p === '/api/logout') {
     await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(user.token_hash).run();
     await audit(env, req, user, 'logout');
@@ -1251,6 +1413,9 @@ async function route(env, req) {
   requirePwChanged(user);
 
   if (m === 'GET' && p === '/api/unread') return unreadSummary(env, req, user);
+  if (m === 'GET' && p === '/api/push/key') return json(env, req, { key: (await vapidKeys(env)).pub });
+  if (m === 'POST' && p === '/api/push/subscribe') return pushSubscribe(env, req, user);
+  if (m === 'POST' && p === '/api/push/unsubscribe') return pushUnsubscribe(env, req, user);
   if (m === 'GET' && p === '/api/rooms') return listRooms(env, req, user, url);
   let mm;
   if ((mm = p.match(/^\/api\/rooms\/(\d+)\/messages$/))) {
@@ -1314,8 +1479,9 @@ function meteredDb(db, acc) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(env, req) });
+    if (ctx) env = { ...env, CTX: ctx };
     let acc = null;
     if (env.DEBUG_METRICS === '1') {
       acc = { q: 0, r: 0, w: 0 };

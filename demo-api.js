@@ -302,6 +302,23 @@
   // 操作の記録は、どのケアマネの記録かを持たせる（事業所の操作は、相手のケアマネの記録に入る）
   const log = (u, action, target, cm) => db.audit.unshift({ id: nextId(), at: Date.now(), action, target, ip: 'デモ', login_id: u?.login_id, name: u?.name, cm: cm ?? u?.cm_id });
   const office = (id) => db.offices.find((o) => o.id === id);
+  // デモ：通知をオンにしていると、送った連絡に相手から自動で返事が来て、サーバーの「合図」をまねて画面に知らせる
+  let demoPush = false;
+  function counterpart(u, c) {
+    return u.role === 'cm'
+      ? db.users.find((x) => x.role === 'provider' && x.active && c.office_ids.includes(x.office_id))
+      : db.users.find((x) => x.id === c.cm_id);
+  }
+  function demoReply(u, c, wait, text) {
+    const other = counterpart(u, c);
+    if (!other || (wait && !demoPush)) return;
+    setTimeout(() => {
+      db.messages.push({ id: nextId(), client_id: c.id, author_id: other.id, body: text || '（デモの自動返信）承知しました。確認して、またご連絡します。', at: Date.now() });
+      if (demoPush) window.dispatchEvent(new Event('careble-signal'));
+    }, wait);
+  }
+  // テスト用：いまログインしている人あてに、相手からの連絡を1件届ける
+  window.demoInject = (clientId, text) => { const c = db.clients.find((x) => x.id === clientId); if (session && c) demoReply(session, c, 0, text); };
   const userOf = (id) => db.users.find((x) => x.id === id);
   // 事業所アカウントが、そのケアマネとつながっていて使える状態か（使えるならそのケアマネ側の事業所を返す）
   const linkFor = (u, cmId) => {
@@ -353,6 +370,10 @@
       if (!b.next || b.next.length < 10) return err(400, 'パスワードは10文字以上にしてください');
       u.pw = b.next; u.must = false; log(u, 'password_change'); return ok({ ok: true });
     }
+    // 通知の合図（デモではブラウザの中でまねをする）
+    if (path === '/api/push/key') return ok({ key: 'demo' });
+    if (path === '/api/push/subscribe') { demoPush = true; return ok({ ok: true }); }
+    if (path === '/api/push/unsubscribe') { demoPush = false; return ok({ ok: true }); }
     if (path === '/api/unread') {
       let rooms = 0, unread = 0, latest = 0;
       db.clients.filter((c) => visible(u, c)).forEach((c) => {
@@ -391,6 +412,7 @@
         const id = nextId();
         db.messages.push({ id, client_id: c.id, author_id: u.id, body: text, at: Date.now() });
         log(u, 'message_post', `${c.name} 様`, c.cm_id);
+        demoReply(u, c, 6000);
         return ok({ ok: true, id });
       }
       const after = Number(q.get('after') || 0);

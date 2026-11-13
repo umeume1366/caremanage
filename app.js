@@ -182,8 +182,6 @@
     toast._t = setTimeout(() => { t.className = ''; }, 3200);
   }
   function clearTimers() { S.timers.forEach(clearInterval); S.timers = []; S.refresh = null; }
-  // 画面が見えていないとき（別アプリ・別タブ）は通信しない：サーバーの負荷と通信量を節約
-  function every(ms, fn) { S.timers.push(setInterval(() => { if (!document.hidden) fn(); }, ms)); }
 
   // ログインID：全角で入力された英数字（１２３４ など）を半角に直し、前後の空白を取る
   const normId = (v) => String(v || '').normalize('NFKC').replace(/\s+/g, '');
@@ -204,12 +202,16 @@
   function fmtFull(ms) { const d = new Date(ms); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${fmtTime(ms)}`; }
 
   // ---------- API ----------
-  async function api(method, path, body) {
+  // passive: 合図を受けて自動で取り直す通信。サーバーは「人が操作した」とは見なさない（自動ログアウトの時間が延びない）
+  //   画面が見えているときは「2」（本人が見た）、裏にあるときは「1」（まだ見ていない＝通知のまとめを続ける）
+  async function api(method, path, body, { passive } = {}) {
     let res;
+    P.last = Date.now();
+    const pv = passive ? (document.visibilityState === 'visible' ? '2' : '1') : '';
     try {
       res = await fetch(API + path, {
         method,
-        headers: { 'Content-Type': 'application/json', ...(S.token ? { Authorization: 'Bearer ' + S.token } : {}) },
+        headers: { 'Content-Type': 'application/json', ...(pv ? { 'X-Careble-Passive': pv } : {}), ...(S.token ? { Authorization: 'Bearer ' + S.token } : {}) },
         body: body ? JSON.stringify(body) : undefined,
         credentials: 'omit',
         cache: 'no-store',
@@ -231,7 +233,7 @@
     clearTimers();
     S.token = null; S.user = null; S.q = ''; S.svc = 'all'; S.clientDraft = null;
     blobCache.clear(); dropUrls();
-    W.latest = null; setTitle(0);
+    P.synced = false; P.on = false; setTitle(0);
     // 開いたままの写真・PDF・ダイアログを画面から消す（ログアウト後に利用者の情報が残らないように）
     document.querySelectorAll('.overlay').forEach((o) => o.remove());
     app.style.height = '';
@@ -253,72 +255,172 @@
   // スリープや別アプリから戻ってきたときは、すぐに確認する（タイマーが止まっていても見逃さない）
   document.addEventListener('visibilitychange', () => { if (!document.hidden) idleCheck(); });
 
-  // ---------- 未読の数（タブの題名）と、パソコンの通知 ----------
-  // ・1分に1回、サーバーに「未読の数だけ」を聞く（タブが裏にあっても動く。軽い通信で、サーバーへの書き込みはない）
-  // ・タブの題名を「(3) ケアブル」のようにする
-  // ・通知をオンにしている人には、タブが裏にあるときに「新しい連絡が ○件 あります」と画面のすみに出す
-  //   （利用者の名前や本文は出さない。ロック画面やのぞき見で個人情報が見えないように）
+  // ---------- 新しい連絡の受け取り方 ----------
+  // 考え方：画面からサーバーへ「新しい連絡はある？」と定期的に聞きに行くのは、やめました。
+  // ・連絡が書かれた瞬間に、サーバーがこの端末へ「合図」を1回だけ送ります（Web Push）。
+  //   合図の待ち受けはブラウザ自身が行うので、待っているあいだ、ケアブルのサーバーとの通信はゼロです
+  // ・合図には中身がありません。利用者の名前も本文も、途中の配達所には渡りません
+  // ・合図が届いたとき：画面を見ている → 画面だけを最新にする（通知は出さない）
+  //                    見ていない・タブを閉じている → 「新しい連絡があります」と通知する
+  // ・サーバーに確認に行くのは「合図が来たとき」「この画面に戻ってきたとき」「自分で操作したとき」だけ
+  // ・合図を受け取れないとき（通知をオフ・対応していないブラウザ）だけ、画面を見ているあいだ、ゆっくり確認します
   const APP_TITLE = 'ケアブル';
-  const W = { latest: null, busy: false, at: 0 };
+  const SAFETY_MS = 10 * 60 * 1000; // 合図を受け取れる端末でも、念のため10分に1回は確認する（画面を見ているときだけ）
+  const P = { on: false, synced: false, busy: false, at: 0, last: 0 };
   function setTitle(n) {
     document.title = n > 0 ? `(${n > 99 ? '99+' : n}) ${APP_TITLE}` : APP_TITLE;
     // ホーム画面に追加して使っているときは、アイコンにも数を出す（対応している端末のみ）
     try { if (navigator.setAppBadge) (n > 0 ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); } catch { /* 無視 */ }
   }
-  const canNotify = () => 'Notification' in window;
-  const notifyOn = () => canNotify() && Notification.permission === 'granted' && safeGet(localStorage, 'notify') === '1';
-  function showNotice(body) {
-    const opt = { body, tag: 'careble-new', renotify: true, icon: 'icon-192.png' };
+  const DEMO = API === 'demo';
+  const pushSupported = () => window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const notifyKey = () => 'notify:' + (S.user ? S.user.id : '');
+  const wantsPush = () => safeGet(localStorage, notifyKey()) === '1';
+  function u8(b64) {
+    const t = String(b64).replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(t + '==='.slice((t.length + 3) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+  function sameKey(sub, key) {
     try {
-      const nt = new Notification(APP_TITLE, opt);
-      nt.onclick = () => { window.focus(); nt.close(); };
-    } catch {
-      // スマホの Chrome などは、こちらの出し方でないと通知を出せない
-      if (navigator.serviceWorker) navigator.serviceWorker.ready.then((reg) => reg.showNotification(APP_TITLE, opt)).catch(() => {});
+      const a = new Uint8Array(sub.options.applicationServerKey), b = u8(key);
+      return a.length === b.length && a.every((x, i) => x === b[i]);
+    } catch { return false; }
+  }
+  function swReady() {
+    return Promise.race([navigator.serviceWorker.ready, new Promise((_, ng) => setTimeout(() => ng(new Error('準備ができませんでした。ページを再読み込みしてください')), 8000))]);
+  }
+  // この端末を「合図の届け先」にする。すでに登録済みで変わりがなければ、通信はしない
+  async function pushOn(key) {
+    if (DEMO) { await api('POST', '/api/push/subscribe', { endpoint: 'demo' }); P.on = true; return; }
+    const reg = await swReady();
+    let sub = await reg.pushManager.getSubscription();
+    key = key || S.pushKey || (await api('GET', '/api/push/key')).key;
+    S.pushKey = key;
+    if (sub && !sameKey(sub, key)) { await sub.unsubscribe().catch(() => {}); sub = null; }
+    if (!sub) {
+      try { sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: u8(key) }); } catch { throw new Error('このブラウザでは通知を登録できませんでした'); }
     }
+    const mark = `${S.user.id}|${sub.endpoint}`;
+    if (safeGet(localStorage, 'push_ep') !== mark) {
+      await api('POST', '/api/push/subscribe', { endpoint: sub.endpoint });
+      safeSet(localStorage, 'push_ep', mark);
+    }
+    P.on = true;
+  }
+  // この端末への合図をやめる（ログアウトしたとき・通知をオフにしたとき）
+  async function pushOff() {
+    P.on = false;
+    safeSet(localStorage, 'push_ep', null);
+    if (DEMO) { await api('POST', '/api/push/unsubscribe', { endpoint: 'demo' }).catch(() => {}); return; }
+    if (!pushSupported()) return;
+    try {
+      const reg = await swReady();
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+    } catch { /* 無視 */ }
+  }
+  // ログインした直後・画面に戻ってきたとき：通知をオンにしている人なら、届け先が生きているかを確かめる（ふだんは通信なし）
+  async function syncPush() {
+    if (!S.user || S.user.must_change_pw || !wantsPush()) { P.on = false; return; }
+    if (!DEMO && (!pushSupported() || Notification.permission !== 'granted')) { P.on = false; return; }
+    try { await pushOn(S.pushKey); } catch { P.on = false; }
   }
   async function checkUnread(force) {
-    if (!S.token || !S.user || S.user.must_change_pw || W.busy) return;
-    if (!force && Date.now() - W.at < 10000) return; // 画面を切り替えるたびに聞きすぎない
-    W.busy = true; W.at = Date.now();
+    if (!S.token || !S.user || S.user.must_change_pw || P.busy) return;
+    if (!force && Date.now() - P.at < 10000) return; // 画面を切り替えるたびに聞きすぎない
+    P.busy = true; P.at = Date.now();
     try {
-      const r = await api('GET', '/api/unread');
-      if (!S.token) return;
-      setTitle(r.unread);
-      // ログイン直後の1回目は「いまの状態」を覚えるだけ。そのあとに届いた分だけを知らせる
-      const isNew = W.latest !== null && r.latest > W.latest;
-      if (isNew && r.unread > 0 && (document.hidden || !document.hasFocus()) && notifyOn()) showNotice(`新しい連絡が ${r.unread}件 あります`);
-      if (W.latest === null || r.latest > W.latest) W.latest = r.latest;
-    } catch { /* 取れなくても画面はそのまま使える（次の回でまた確認する） */ } finally { W.busy = false; }
+      const r = await api('GET', '/api/unread', null, { passive: true });
+      if (S.token) setTitle(r.unread);
+    } catch { /* 取れなくても画面はそのまま使える */ } finally { P.busy = false; }
   }
-  setInterval(() => checkUnread(true), 60 * 1000);
+  // 合図が届いた／画面に戻ってきた：未読の数と、いま開いている画面を1回だけ取り直す
+  function refreshNow() {
+    if (!S.token || !S.user) return;
+    checkUnread(true);
+    if (S.refresh) S.refresh(true);
+  }
+  // 画面の自動更新の予備。合図を受け取れる端末では10分に1回まで、受け取れない端末では plainMs ごと（どちらも画面を見ているときだけ）
+  function watch(plainMs, fn) {
+    S.timers.push(setInterval(() => {
+      if (document.hidden) return;
+      const gap = Date.now() - P.last;
+      if (P.on ? gap >= SAFETY_MS : gap >= plainMs - 500) fn(true);
+    }, Math.min(plainMs, 20000)));
+  }
+  // サービスワーカーから「合図が届いた」と知らせが来たら
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const t = e.data && e.data.type;
+      if (t === 'careble:new') refreshNow();
+      if (t === 'careble:resub') { safeSet(localStorage, 'push_ep', null); syncPush(); }
+    });
+  }
+  // デモ：サーバーの代わりに、ブラウザの中で合図をまねする
+  function localNotice(body) {
+    try { const nt = new Notification(APP_TITLE, { body, tag: 'careble-new', icon: 'icon-192.png' }); nt.onclick = () => { window.focus(); nt.close(); }; } catch { /* 無視 */ }
+  }
+  addEventListener('careble-signal', () => {
+    if (!P.on) return;
+    if ((document.hidden || !document.hasFocus()) && 'Notification' in window && Notification.permission === 'granted') localNotice('新しい連絡があります。開いて確認してください');
+    refreshNow();
+  });
   // ほかのタブ・ほかのソフトから戻ってきたら、すぐに数と画面を最新にする
+  addEventListener('focus', () => { if (S.token && Date.now() - P.last > 3000) refreshNow(); });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden || !S.token) return;
-    checkUnread(true);
-    if (S.refresh) S.refresh();
+    refreshNow();
+    syncPush();
   });
 
-  // 通知のオン・オフ（メニューから）
+  // 通知のオン・オフ（メニュー・一覧の案内から）
+  function blockedHelp() {
+    dialog('通知がブロックされています', h('div', null,
+      h('p', null, 'このブラウザで、ケアブルの通知が「ブロック」になっています。次の手順で「許可」に変えると、使えるようになります。'),
+      h('ol', { class: 'steps' },
+        h('li', null, 'アドレス欄の左はしにあるマーク（鍵や設定の絵）を押します。'),
+        h('li', null, '「通知」を「許可」に変えます。'),
+        h('li', null, 'このページを再読み込みして、もう一度このボタンを押します。'))),
+    (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
+  }
   async function toggleNotify() {
-    if (!canNotify()) return;
-    if (Notification.permission === 'denied') {
-      dialog('通知がブロックされています', h('div', null,
-        h('p', null, 'このブラウザで、ケアブルの通知が「ブロック」になっています。次の手順で「許可」に変えると、使えるようになります。'),
-        h('ol', { class: 'steps' },
-          h('li', null, 'アドレス欄の左はしにあるマーク（鍵や設定の絵）を押します。'),
-          h('li', null, '「通知」を「許可」に変えます。'),
-          h('li', null, 'このページを再読み込みして、もう一度このボタンを押します。'))),
-      (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
+    if (!DEMO && !pushSupported()) {
+      dialog('このブラウザは通知に対応していません', h('p', null, 'パソコンの Chrome・Edge・Firefox・Safari でケアブルを開くと、通知を受け取れます。'),
+        (close) => [h('button', { class: 'btn', onclick: close }, 'わかりました')]);
       return;
     }
-    if (notifyOn()) { safeSet(localStorage, 'notify', null); toast('通知をオフにしました'); route(); return; }
-    let perm = Notification.permission;
-    if (perm !== 'granted') { try { perm = await Notification.requestPermission(); } catch { perm = 'default'; } }
-    if (perm !== 'granted') { toast('通知が許可されませんでした', true); route(); return; }
-    safeSet(localStorage, 'notify', '1');
-    showNotice('通知をオンにしました。新しい連絡が届くと、このようにお知らせします');
-    toast('通知をオンにしました'); route();
+    if ('Notification' in window && Notification.permission === 'denied') { blockedHelp(); return; }
+    if (P.on) {
+      safeSet(localStorage, notifyKey(), null);
+      await pushOff();
+      toast('このパソコンへの通知をオフにしました'); route(); return;
+    }
+    let perm = 'Notification' in window ? Notification.permission : 'default';
+    if (perm !== 'granted' && 'Notification' in window) { try { perm = await Notification.requestPermission(); } catch { perm = 'default'; } }
+    if (perm !== 'granted' && !DEMO) { if (perm === 'denied') blockedHelp(); else toast('通知が許可されませんでした', true); route(); return; }
+    try { await pushOn(); } catch (ex) { toast(ex.message, true); route(); return; }
+    safeSet(localStorage, notifyKey(), '1');
+    toast('通知をオンにしました。ケアブルを閉じていても届きます');
+    route();
+  }
+  function notifyHint() {
+    if (!DEMO && !pushSupported()) return 'このブラウザは対応していません（パソコンの Chrome・Edge・Firefox・Safari で使えます）';
+    if ('Notification' in window && Notification.permission === 'denied') return 'ブラウザでブロックされています。押すと直し方が出ます';
+    if (P.on) return 'ケアブルを閉じていても、ブラウザが起動していれば届きます。ログアウトすると、このパソコンには届かなくなります。押すとオフ';
+    return '押すとオンにできます。ほかの作業中やケアブルを閉じているときも、新しい連絡に気づけます';
+  }
+  // 一覧の上に出す案内（通知をまだオンにしていない人だけ。「あとで」を押したら7日間出さない）
+  function notifyInvite() {
+    if (P.on || (!DEMO && !pushSupported()) || ('Notification' in window && Notification.permission === 'denied')) return null;
+    if (Number(safeGet(localStorage, 'notify_later') || 0) > Date.now()) return null;
+    const box = h('div', { class: 'invite', role: 'note' },
+      h('div', { class: 'invite-text' }, h('b', null, '🔔 新しい連絡を、通知で受け取れます'), h('br'),
+        h('span', null, 'ケアブルを閉じていても、連絡が届いた瞬間にパソコンの画面のすみでお知らせします。')),
+      h('div', { class: 'invite-btns' },
+        h('button', { class: 'btn', type: 'button', onclick: toggleNotify }, 'オンにする'),
+        h('button', { class: 'btn secondary', type: 'button', onclick: () => { safeSet(localStorage, 'notify_later', String(Date.now() + 7 * 864e5)); box.remove(); } }, 'あとで')));
+    return box;
   }
 
   // ---------- 画面共通 ----------
@@ -388,8 +490,9 @@
     dropUrls();
     if (!S.token) return renderLogin();
     if (!S.user) {
-      try { S.user = (await api('GET', '/api/me')).user; useUserSize(S.user); } catch { return; }
+      try { const me = await api('GET', '/api/me'); S.user = me.user; S.pushKey = me.push_key || null; useUserSize(S.user); } catch { return; }
     }
+    if (!P.synced && !S.user.must_change_pw) { P.synced = true; syncPush(); }
     if (S.user.must_change_pw) return renderPassword(true);
     checkUnread();
     const parts = (curHash() || '#/').slice(2).split('/');
@@ -535,7 +638,10 @@
     cur.focus();
   }
 
+  // 自分でログアウトしたら、このパソコンへの通知も止める（共用のパソコンで、次の人に届かないように）
+  // ※ 30分操作がなくて自動でログアウトしたときは止めない（席を外していても、新しい連絡に気づけるように）
   async function doLogout() {
+    await pushOff();
     try { await api('POST', '/api/logout'); } catch { /* 無視 */ }
     logoutLocal('ログアウトしました');
   }
@@ -584,7 +690,7 @@
       fill(notice, `🔔 ケアマネジャーから「つながる依頼」が ${S.user.pending || 0}件 届いています`, h('span', { class: 'go' }, '確認する ›'));
     }
     drawNotice();
-    mount(topbar(title, { sub: `${S.user.name} さん`, right: menuButton(), dog: true }), tabs, notice, isCm && !officeId ? chipBox : cmBox, searchBox, h('main', null, listBox));
+    mount(topbar(title, { sub: `${S.user.name} さん`, right: menuButton(), dog: true }), tabs, notice, notifyInvite(), isCm && !officeId ? chipBox : cmBox, searchBox, h('main', null, listBox));
     if (!isCm && S.cmFilter == null) S.cmFilter = 'all';
     let cms = [];
     function drawCms() {
@@ -664,28 +770,29 @@
       ]));
     }
 
-    const load = async () => {
+    const load = async (passive) => {
       try {
-        if (isCm) {
+        // 合図を受けての取り直しでは、変わりやすい「一覧」だけを取る（事業所の一覧などは取り直さない）
+        if (isCm && !(passive && offices.length)) {
           offices = (await api('GET', '/api/offices')).offices;
           if (!officeId) drawChips();
         }
         if (tab === 'offices') { drawOffices(); return; }
         const sel = isCm && !officeId ? svcTypes() : null;
         const q = officeId ? `?office_id=${officeId}` : (sel && sel.length === 1 ? `?service_type=${encodeURIComponent(sel[0])}` : '');
-        const got = await api('GET', '/api/rooms' + q);
+        const got = await api('GET', '/api/rooms' + q, null, { passive });
         rooms = got.rooms;
         if (!isCm) {
           cms = got.cms || []; drawCms();
-          try { S.user = (await api('GET', '/api/me')).user; drawNotice(); } catch { /* そのまま */ }
+          if (!passive) { try { S.user = (await api('GET', '/api/me')).user; drawNotice(); } catch { /* そのまま */ } }
         }
         // 大分類（居宅・入所）で絞るときは、画面側でまとめて絞り込む
         if (sel && sel.length > 1) rooms = rooms.filter((r) => r.offices.some((o) => sel.includes(o.service_type)));
         drawRooms();
-      } catch (ex) { fill(listBox, h('p', { class: 'empty error' }, ex.message)); }
+      } catch (ex) { if (!passive) fill(listBox, h('p', { class: 'empty error' }, ex.message)); }
     };
     await load();
-    every(30000, load);
+    watch(60000, load);
     S.refresh = load;
   }
 
@@ -892,10 +999,10 @@
 
     // 新しいメッセージの取り込みは、同時に1つだけ行う（重なると同じ吹き出しが2つ出るため）
     let pulling = null, sending = false;
-    async function pull() {
+    async function pull(passive) {
       while (pulling) { try { await pulling; } catch { /* 次へ */ } }
       pulling = (async () => {
-        const more = await api('GET', `/api/rooms/${clientId}/messages?after=${lastId}`);
+        const more = await api('GET', `/api/rooms/${clientId}/messages?after=${lastId}`, null, { passive });
         if (more.messages.length) { scroll.querySelector('.empty')?.remove(); addMessages(more.messages); checkUnread(true); }
         applyReads(more.reads);
       })();
@@ -946,8 +1053,10 @@
       }
     } catch (ex) { scroll.replaceChildren(h('p', { class: 'empty error' }, ex.message)); return; }
 
-    const quietPull = async () => { if (sending || pulling) return; try { await pull(); } catch { /* 次回再試行 */ } };
-    every(5000, quietPull);
+    // 相手の書き込みは、サーバーからの合図で取り込む。合図を受け取れない端末だけ、画面を見ているあいだ20秒ごとに確認する
+    // 画面が裏にあるときは取り込まない（見ていないのに「既読」にならないように）。戻ってきた瞬間に取り込む
+    const quietPull = async () => { if (sending || pulling || document.hidden) return; try { await pull(true); } catch { /* 次回再試行 */ } };
+    watch(20000, quietPull);
     S.refresh = quietPull;
   }
   addEventListener('hashchange', () => { app.style.height = ''; });
@@ -978,12 +1087,10 @@
           h('ul', { class: 'menu' },
           h('li', null, h('button', { onclick: () => go('#/password') }, '🔒 パスワード変更')),
           isCm ? h('li', null, h('button', { onclick: () => go('#/manage/audit') }, '📋 操作の記録（監査ログ）', h('span', { class: 'hint' }, 'だれが・いつ見たかを確認できます'))) : null)),
-        canNotify() ? h('ul', { class: 'menu' },
-          h('li', null, h('button', { onclick: toggleNotify }, '🔔 新しい連絡のお知らせ（通知）',
-            h('span', { class: 'tag ' + (notifyOn() ? 'ok' : '') }, notifyOn() ? 'オン' : 'オフ'),
-            h('span', { class: 'hint' }, Notification.permission === 'denied' ? 'ブラウザでブロックされています。押すと直し方が出ます'
-              : notifyOn() ? 'このタブを開いたままにしておくと、新しい連絡を画面のすみでお知らせします。押すとオフにできます'
-                : '押すとオンにできます。ほかの作業中でも、新しい連絡に気づけます')))) : null,
+        h('ul', { class: 'menu' },
+          h('li', null, h('button', { onclick: toggleNotify }, '🔔 新しい連絡のお知らせ（このパソコン）',
+            h('span', { class: 'tag ' + (P.on ? 'ok' : '') }, P.on ? 'オン' : 'オフ'),
+            h('span', { class: 'hint' }, notifyHint())))),
         isApp() ? null : h('ul', { class: 'menu' },
           h('li', null, h('button', { onclick: installApp }, '📲 ホーム画面に追加（アプリにする）',
             h('span', { class: 'hint' }, 'アイコンを押すだけで、すぐ開けるようになります')))),

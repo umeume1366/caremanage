@@ -472,3 +472,15 @@ p, .hint, .bubble { text-wrap: pretty; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* 通知の案内（一覧の上。まだ通知をオンにしていない人だけ） */
+.invite {
+  display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: center; justify-content: space-between;
+  margin: .75rem auto 0; max-width: 64rem; width: calc(100% - 1.5rem);
+  padding: .85rem 1rem; border: 1.5px solid var(--brand-edge); border-radius: var(--radius);
+  background: var(--brand-soft); color: var(--text); box-shadow: var(--shadow);
+}
+.invite-text { flex: 1 1 18rem; line-height: 1.6; }
+.invite-text span { color: var(--sub); font-size: .92em; }
+.invite-btns { display: flex; gap: .5rem; flex: 0 0 auto; }
+.invite-btns .btn { width: auto; padding-inline: 1.1rem; }

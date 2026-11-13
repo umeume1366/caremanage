@@ -72,12 +72,42 @@ self.addEventListener('fetch', (e) => {
   })());
 });
 
-// 通知を押したら、開いているケアブルの画面を前に出す（なければ新しく開く）
+// ---------- 新しい連絡の合図（Web Push） ----------
+// サーバーから空の合図が届いたら：
+// ・ケアブルの画面を見ている → 画面に「最新にして」と伝えるだけ（通知は出さない）
+// ・見ていない・閉じている → 「新しい連絡があります」と通知する（名前や本文は出さない）
+// 同じ札（tag）を使うので、通知がたまらず、いつも1つだけになる
+self.addEventListener('push', (e) => {
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    wins.forEach((w) => w.postMessage({ type: 'careble:new' }));
+    if (wins.some((w) => w.visibilityState === 'visible' && w.focused)) return;
+    try { if (self.navigator.setAppBadge) await self.navigator.setAppBadge(); } catch { /* 対応していない端末 */ }
+    await self.registration.showNotification('ケアブル', {
+      body: '新しい連絡があります。開いて確認してください',
+      tag: 'careble-new',
+      renotify: true,
+      requireInteraction: true, // パソコンでは、押すか閉じるまで画面のすみに残す（見落とし防止）
+      icon: 'icon-192.png',
+      badge: 'icon-192.png',
+      lang: 'ja',
+    });
+  })());
+});
+
+// ブラウザの都合で届け先が変わったとき：次に画面を開いたときに登録し直すよう、開いている画面に伝える
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => wins.forEach((w) => w.postMessage({ type: 'careble:resub' }))));
+});
+
+// 通知を押したら、開いているケアブルの画面を前に出して最新にする（なければ新しく開く）
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   e.waitUntil((async () => {
     const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of list) { if ('focus' in c) return c.focus(); }
+    for (const c of list) {
+      if ('focus' in c) { c.postMessage({ type: 'careble:new' }); return c.focus(); }
+    }
     if (self.clients.openWindow) return self.clients.openWindow('./');
   })());
 });
